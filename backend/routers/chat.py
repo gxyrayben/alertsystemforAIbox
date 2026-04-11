@@ -30,9 +30,7 @@ async def chat_with_ai(request: ChatRequest):
                         "parts": [{"text": text}]
                     })
                 
-                payload = {
-                    "contents": contents
-                }
+                payload = {"contents": contents}
                 
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
@@ -45,23 +43,31 @@ async def chat_with_ai(request: ChatRequest):
                     response_text = "未获取到回复内容"
                     
             else:
-                # OpenAI Compatible API Format
+                # OpenAI Compatible API Format (Moonshot, DeepSeek, etc.)
                 url = f"{base_url}/chat/completions"
                 headers = {"Authorization": f"Bearer {api_key}"}
                 
                 messages = []
-                for msg in request.messages:
+                for idx, msg in enumerate(request.messages):
                     role = msg.get("role")
                     text = msg.get("text")
+                    
+                    if role == "user":
+                        target_role = "user"
+                    elif idx == 0:
+                        # First message cannot be 'assistant' for many APIs (e.g. Moonshot)
+                        target_role = "system"
+                    else:
+                        target_role = "assistant"
+                        
                     messages.append({
-                        "role": "user" if role == "user" else "assistant",
+                        "role": target_role,
                         "content": text
                     })
                 
                 payload = {
                     "model": model_name,
-                    "messages": messages,
-                    "temperature": 0.7
+                    "messages": messages
                 }
                 
                 response = await client.post(url, headers=headers, json=payload)
