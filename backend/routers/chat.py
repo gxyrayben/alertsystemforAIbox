@@ -79,6 +79,3 @@ async def chat_with_ai(request: ChatRequest):
         raise HTTPException(status_code=500, detail=f"与大模型通信失败: {str(e)}")
         
     return {"text": response_text}
-通信失败: {str(e)}")
-        
-    return {"text": response_text}
