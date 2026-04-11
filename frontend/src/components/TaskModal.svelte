@@ -1,5 +1,6 @@
 <script>
     import { createEventDispatcher } from 'svelte';
+    import { onMount } from 'svelte';
     
     export let task = null; // null means create new
     export let devices = [];
@@ -23,7 +24,10 @@
     const taskTypes = ['Prompt调优', '警戒分析'];
     const priorities = ['高', '中', '低'];
     const mockChannels = ['CH01 (主入口)', 'CH02 (次入口)', 'CH03 (周边)', 'CH04 (室内)'];
-    const availableAlgorithms = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测', '异常离岗'];
+    
+    // Default algorithms, but we will mock fetching from device
+    const defaultAlgorithms = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测', '异常离岗'];
+    let availableAlgorithms = [];
 
     // parse JSON array string for algorithms
     let selectedAlgorithms = [];
@@ -35,8 +39,6 @@
         selectedAlgorithms = [];
     }
 
-    $: formData.algorithms = JSON.stringify(selectedAlgorithms);
-
     // Dynamic list of channels based on selected device (mock)
     $: availableChannels = formData.device_id ? mockChannels : [];
     
@@ -44,6 +46,24 @@
     $: relatedTasks = (formData.device_id && formData.channel) 
         ? tasks.filter(t => t.device_id === formData.device_id && t.channel === formData.channel && t.id !== formData.id) 
         : [];
+
+    // Mock fetching algorithms from the selected device
+    $: if (formData.device_id) {
+        // Here you would normally fetch from API based on device_id
+        // For now we simulate that different devices might have different algorithms
+        const deviceHash = formData.device_id.charCodeAt(0) % 2;
+        availableAlgorithms = deviceHash === 0 
+            ? defaultAlgorithms.slice(0, 4) 
+            : defaultAlgorithms;
+        
+        // Remove selected algorithms that are no longer available for this device
+        selectedAlgorithms = selectedAlgorithms.filter(alg => availableAlgorithms.includes(alg));
+    } else {
+        availableAlgorithms = [];
+        selectedAlgorithms = [];
+    }
+
+    let showAlgDropdown = false;
 
     function toggleAlgorithm(alg) {
         if (selectedAlgorithms.includes(alg)) {
@@ -62,13 +82,26 @@
             alert('请至少选择一个智能体算法');
             return;
         }
+        
+        // Update formData before dispatching
+        formData.algorithms = JSON.stringify(selectedAlgorithms);
+        
         dispatch('save', formData);
     }
     
     function handleCancel() {
         dispatch('close');
     }
+
+    // Close dropdown when clicking outside
+    function handleClickOutside(e) {
+        if (showAlgDropdown && !e.target.closest('.alg-dropdown-container')) {
+            showAlgDropdown = false;
+        }
+    }
 </script>
+
+<svelte:window on:click={handleClickOutside} />
 
 <div class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -79,103 +112,121 @@
             </button>
         </div>
         
-        <div class="p-6 overflow-y-auto flex-1 space-y-5">
-            <!-- 基础信息 -->
-            <div class="grid grid-cols-2 gap-4">
-                <div class="col-span-2 sm:col-span-1">
-                    <label class="block text-sm font-medium text-slate-700 mb-1" for="taskName">任务名称 <span class="text-red-500">*</span></label>
-                    <input id="taskName" type="text" bind:value={formData.name} class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如：测试安防任务" />
+        <div class="p-6 overflow-y-auto flex-1">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+                <!-- 任务名称 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="taskName">任务名称 <span class="text-red-500">*</span></label>
+                    <input id="taskName" type="text" bind:value={formData.name} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" placeholder="例如：测试安防任务" />
                 </div>
-                <div class="col-span-2 sm:col-span-1">
-                    <label class="block text-sm font-medium text-slate-700 mb-1" for="taskType">任务类型 <span class="text-red-500">*</span></label>
-                    <select id="taskType" bind:value={formData.task_type} class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                
+                <!-- 任务类型 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="taskType">任务类型 <span class="text-red-500">*</span></label>
+                    <select id="taskType" bind:value={formData.task_type} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
                         {#each taskTypes as type}
                             <option value={type}>{type}</option>
                         {/each}
                     </select>
                 </div>
-            </div>
 
-            <!-- 设备和通道 -->
-            <div class="grid grid-cols-2 gap-4">
-                <div class="col-span-2 sm:col-span-1">
-                    <label class="block text-sm font-medium text-slate-700 mb-1" for="deviceId">关联设备 <span class="text-red-500">*</span></label>
-                    <select id="deviceId" bind:value={formData.device_id} class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <!-- 关联设备 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="deviceId">关联设备 <span class="text-red-500">*</span></label>
+                    <select id="deviceId" bind:value={formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
                         <option value="">请选择设备</option>
                         {#each devices as device}
                             <option value={device.device_id}>{device.name} ({device.device_id})</option>
                         {/each}
                     </select>
                 </div>
-                <div class="col-span-2 sm:col-span-1">
-                    <label class="block text-sm font-medium text-slate-700 mb-1" for="channelId">关联通道 <span class="text-red-500">*</span></label>
-                    <select id="channelId" bind:value={formData.channel} disabled={!formData.device_id} class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100">
+                
+                <!-- 关联通道 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="channelId">关联通道 <span class="text-red-500">*</span></label>
+                    <select id="channelId" bind:value={formData.channel} disabled={!formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-slate-100 disabled:text-slate-500 bg-white">
                         <option value="">{formData.device_id ? '请选择通道' : '请先选择设备'}</option>
                         {#each availableChannels as channel}
                             <option value={channel}>{channel}</option>
                         {/each}
                     </select>
                 </div>
-            </div>
 
-            <!-- 智能体算法选择 -->
-            <div>
-                <label class="block text-sm font-medium text-slate-700 mb-2">智能体算法 <span class="text-red-500">*</span></label>
-                <div class="flex flex-wrap gap-2">
-                    {#each availableAlgorithms as alg}
-                        <button 
-                            type="button" 
-                            class="px-3 py-1.5 text-sm rounded-full border transition-colors {selectedAlgorithms.includes(alg) ? 'bg-blue-50 border-blue-200 text-blue-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}"
-                            on:click={() => toggleAlgorithm(alg)}
-                        >
-                            {#if selectedAlgorithms.includes(alg)}
-                                <svg class="w-3.5 h-3.5 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
-                            {/if}
-                            {alg}
-                        </button>
-                    {/each}
-                </div>
-            </div>
-
-            <!-- 关联任务信息展示 -->
-            {#if formData.device_id && formData.channel}
-                <div class="bg-blue-50/50 rounded-lg p-4 border border-blue-100">
-                    <h4 class="text-sm font-medium text-blue-900 mb-2 flex items-center">
-                        <svg class="w-4 h-4 mr-1 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        该通道下已关联的任务：
-                    </h4>
-                    {#if relatedTasks.length > 0}
-                        <ul class="list-disc list-inside text-sm text-blue-700 pl-4 space-y-1">
-                            {#each relatedTasks as rt}
-                                <li>{rt.name} <span class="text-blue-500/70">({rt.task_type})</span></li>
+                <!-- 智能体算法 (Custom Multi-Select Dropdown) -->
+                <div class="col-span-1 md:col-span-2 alg-dropdown-container relative">
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5">智能体算法 <span class="text-red-500">*</span></label>
+                    <button 
+                        type="button"
+                        disabled={!formData.device_id}
+                        class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg flex items-center justify-between focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-slate-100 disabled:cursor-not-allowed bg-white"
+                        on:click={() => showAlgDropdown = !showAlgDropdown}
+                    >
+                        <span class="truncate text-slate-700">
+                            {!formData.device_id ? '请先选择设备获取算法列表' : (selectedAlgorithms.length ? selectedAlgorithms.join(', ') : '请选择智能体算法')}
+                        </span>
+                        <svg class="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
+                    
+                    {#if showAlgDropdown && formData.device_id}
+                        <div class="absolute z-10 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                            {#each availableAlgorithms as alg}
+                                <label class="flex items-center px-4 py-2.5 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0 transition-colors">
+                                    <input 
+                                        type="checkbox" 
+                                        class="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 mr-3" 
+                                        checked={selectedAlgorithms.includes(alg)} 
+                                        on:change={() => toggleAlgorithm(alg)} 
+                                    />
+                                    <span class="text-sm text-slate-700">{alg}</span>
+                                </label>
                             {/each}
-                        </ul>
-                    {:else}
-                        <p class="text-sm text-blue-600/70 pl-1">暂无其他任务关联此通道。</p>
+                            {#if availableAlgorithms.length === 0}
+                                <div class="px-4 py-3 text-sm text-slate-500 text-center">该设备暂无可用算法</div>
+                            {/if}
+                        </div>
                     {/if}
                 </div>
-            {/if}
 
-            <!-- 其他 -->
-            <div class="grid grid-cols-2 gap-4">
-                <div class="col-span-2 sm:col-span-1">
-                    <label class="block text-sm font-medium text-slate-700 mb-1" for="priority">优先级</label>
-                    <select id="priority" bind:value={formData.priority} class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <!-- 优先级 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="priority">优先级</label>
+                    <select id="priority" bind:value={formData.priority} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
                         {#each priorities as priority}
                             <option value={priority}>{priority}</option>
                         {/each}
                     </select>
                 </div>
-                <div class="col-span-2 sm:col-span-1">
-                    <label class="block text-sm font-medium text-slate-700 mb-1" for="assignee">负责人</label>
-                    <input id="assignee" type="text" bind:value={formData.assignee} class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如：张三" />
+                
+                <!-- 负责人 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="assignee">负责人</label>
+                    <input id="assignee" type="text" bind:value={formData.assignee} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" placeholder="例如：张三" />
                 </div>
             </div>
+
+            <!-- 关联任务信息展示 -->
+            {#if formData.device_id && formData.channel}
+                <div class="mt-6 bg-blue-50/50 rounded-lg p-4 border border-blue-100">
+                    <h4 class="text-sm font-medium text-blue-900 mb-2 flex items-center">
+                        <svg class="w-4 h-4 mr-1.5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        该通道下已关联的任务：
+                    </h4>
+                    {#if relatedTasks.length > 0}
+                        <ul class="list-disc list-inside text-sm text-blue-700 pl-4 space-y-1.5">
+                            {#each relatedTasks as rt}
+                                <li>{rt.name} <span class="text-blue-500/70 ml-1">({rt.task_type})</span></li>
+                            {/each}
+                        </ul>
+                    {:else}
+                        <p class="text-sm text-blue-600/70 pl-5">暂无其他任务关联此通道。</p>
+                    {/if}
+                </div>
+            {/if}
         </div>
         
         <div class="px-6 py-4 border-t border-slate-100 flex justify-end gap-3 bg-slate-50">
-            <button on:click={handleCancel} class="px-4 py-2 border border-slate-300 rounded-lg text-slate-700 font-medium hover:bg-slate-100 transition-colors">取消</button>
-            <button on:click={handleSave} class="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors shadow-sm">保存</button>
+            <button on:click={handleCancel} class="px-5 py-2 text-sm border border-slate-300 rounded-lg text-slate-700 font-medium hover:bg-slate-100 transition-colors shadow-sm bg-white">取消</button>
+            <button on:click={handleSave} class="px-5 py-2 text-sm bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors shadow-sm">保存</button>
         </div>
     </div>
 </div>
