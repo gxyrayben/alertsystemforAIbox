@@ -75,3 +75,24 @@ class TaskResponse(TaskBase):
     
     class Config:
         from_attributes = True
+
+class LogBase(BaseModel):
+    log_id: str
+    device_name: str
+    api_path: str
+    parameters: str
+    result: str
+    timestamp: int
+
+class LogCreate(LogBase):
+    pass
+
+class LogResponse(LogBase):
+    id: str
+
+    class Config:
+        from_attributes = True
+
+class LogListResponse(BaseModel):
+    items: List[LogResponse]
+    total: int

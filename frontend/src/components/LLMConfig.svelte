@@ -90,7 +90,7 @@
                 body: JSON.stringify(config)
             });
             if (res.ok) {
-                alert('大模型配置已保存并应用！');
+                alert('模型配置已保存并应用！');
             } else {
                 const err = await res.json();
                 alert(`保存失败: ${err.detail || res.statusText}`);

@@ -34,3 +34,13 @@ class TaskORM(Base):
     priority = Column(String, default="中")
     due_date = Column(BigInteger, nullable=True)
     created_at = Column(BigInteger, nullable=False)
+
+class LogORM(Base):
+    __tablename__ = "logs"
+    id = Column(String, primary_key=True, index=True)
+    log_id = Column(String, index=True)
+    device_name = Column(String, index=True)
+    api_path = Column(String)
+    parameters = Column(String)
+    result = Column(String)
+    timestamp = Column(BigInteger, index=True)
