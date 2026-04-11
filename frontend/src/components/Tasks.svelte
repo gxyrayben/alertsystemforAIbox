@@ -167,5 +167,5 @@
 </div>
 
 {#if showModal}
-    <TaskModal task={editingTask} {devices} on:save={saveTask} on:close={closeModal} />
+    <TaskModal task={editingTask} {devices} {tasks} on:save={saveTask} on:close={closeModal} />
 {/if}

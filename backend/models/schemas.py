@@ -64,6 +64,8 @@ class TaskUpdate(BaseModel):
     name: Optional[str] = None
     task_type: Optional[str] = None
     device_id: Optional[str] = None
+    channel: Optional[str] = None
+    algorithms: Optional[str] = None
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[str] = None
