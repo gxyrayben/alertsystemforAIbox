@@ -1,0 +1,33 @@
+# General
+.DS_Store
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+.env
+
+# Database
+*.db
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Frontend (Node.js)
+node_modules/
+dist/
+.svelte-kit/
+
+# Project specific
+backend/uploads/
+backend/*.jpg
+backend/test_payload.json
+
+# IDEs
+.idea/
+.vscode/
+*.swp
