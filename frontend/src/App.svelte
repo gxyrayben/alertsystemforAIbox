@@ -6,6 +6,7 @@
     import Network from './components/Network.svelte';
     import Services from './components/Services.svelte';
     import LLMConfig from './components/LLMConfig.svelte';
+    import Logs from './components/Logs.svelte';
     import Sessions from './components/Sessions.svelte';
 
     let activeMenu = localStorage.getItem('activeMenu') || 'network';
