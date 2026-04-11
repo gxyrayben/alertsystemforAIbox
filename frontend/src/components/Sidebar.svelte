@@ -11,7 +11,8 @@
         { id: 'alerts', icon: 'AlertTriangle', label: '预警管理' },
         { id: 'services', icon: 'Settings', label: '服务管理' },
         { id: 'network', icon: 'Network', label: '网络配置' },
-        { id: 'llm', icon: 'Cpu', label: '大模型配置' },
+        { id: 'llm', icon: 'Cpu', label: '模型配置' },
+        { id: 'logs', icon: 'FileText', label: '日志管理' },
         { id: 'sessions', icon: 'MessageSquare', label: '会话管理' }
     ];
 

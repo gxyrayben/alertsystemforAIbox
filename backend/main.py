@@ -9,7 +9,7 @@ from sqlalchemy.future import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from routers import devices, alerts, network, services, chat, llm, tasks
+from routers import devices, alerts, network, services, chat, llm, tasks, logs
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
 import services_manager
@@ -87,3 +87,4 @@ app.include_router(tasks.router)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+ost="0.0.0.0", port=8000)

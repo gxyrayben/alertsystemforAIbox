@@ -20,7 +20,7 @@
         'alerts': '预警管理',
         'services': '服务管理',
         'network': '网络配置',
-        'llm': '大模型配置',
+        'llm': '模型配置',
         'sessions': '会话管理'
     };
 
@@ -50,6 +50,8 @@
                 <Network />
             {:else if activeMenu === 'llm'}
                 <LLMConfig />
+            {:else if activeMenu === 'logs'}
+                <Logs />
             {:else if activeMenu === 'services'}
                 <Services />
             {:else if activeMenu === 'sessions'}
