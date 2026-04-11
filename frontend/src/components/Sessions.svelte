@@ -29,9 +29,13 @@
                 body: JSON.stringify({ messages: chatMessages })
             });
             const data = await res.json();
-            chatMessages = [...chatMessages, { role: 'model', text: data.text }];
+            if (res.ok) {
+                chatMessages = [...chatMessages, { role: 'model', text: data.text }];
+            } else {
+                chatMessages = [...chatMessages, { role: 'model', text: `请求失败: ${data.detail || '未知错误'}` }];
+            }
         } catch (error) {
-            chatMessages = [...chatMessages, { role: 'model', text: "请求失败，请检查后端服务是否启动。" }];
+            chatMessages = [...chatMessages, { role: 'model', text: "网络错误，请检查后端服务是否启动。" }];
         } finally {
             isChatLoading = false;
             await scrollToBottom();

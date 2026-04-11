@@ -31,10 +31,7 @@ async def chat_with_ai(request: ChatRequest):
                     })
                 
                 payload = {
-                    "contents": contents,
-                    "generationConfig": {
-                        "temperature": 0.7,
-                    }
+                    "contents": contents
                 }
                 
                 response = await client.post(url, json=payload)
@@ -80,5 +77,8 @@ async def chat_with_ai(request: ChatRequest):
     except Exception as e:
         print(f"Chat API Error: {e}")
         raise HTTPException(status_code=500, detail=f"与大模型通信失败: {str(e)}")
+        
+    return {"text": response_text}
+通信失败: {str(e)}")
         
     return {"text": response_text}
