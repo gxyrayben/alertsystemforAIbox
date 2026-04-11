@@ -83,6 +83,7 @@ app.include_router(services.router)
 app.include_router(chat.router)
 app.include_router(llm.router)
 app.include_router(tasks.router)
+app.include_router(logs.router)
 
 if __name__ == "__main__":
     import uvicorn
