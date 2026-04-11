@@ -133,14 +133,32 @@
                 <button on:click={() => isDeviceModalOpen = false} class="text-gray-400 hover:text-gray-600"><Icon name="X" className="w-5 h-5" /></button>
             </div>
             <div class="px-6 py-5 space-y-4">
-                <input type="text" placeholder="设备业务 ID (用于协议匹配) *" bind:value={deviceFormData.device_id} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
-                <input type="text" placeholder="设备名称 *" bind:value={deviceFormData.name} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
-                <div class="flex space-x-4">
-                    <input type="text" placeholder="IP 地址 *" bind:value={deviceFormData.ip} class="w-full px-4 py-2 border rounded-lg flex-1 outline-none focus:ring-2 focus:ring-blue-500" />
-                    <input type="text" placeholder="端口" bind:value={deviceFormData.port} class="w-full px-4 py-2 border rounded-lg w-32 outline-none focus:ring-2 focus:ring-blue-500" />
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">设备业务 ID <span class="text-red-500">*</span></label>
+                    <input type="text" placeholder="例如：DEV-001" bind:value={deviceFormData.device_id} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
-                <input type="text" placeholder="用户名" bind:value={deviceFormData.username} class="w-full px-4 py-2 border rounded-lg outline-none" />
-                <input type="password" placeholder="密码" bind:value={deviceFormData.password} class="w-full px-4 py-2 border rounded-lg outline-none" />
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">设备名称 <span class="text-red-500">*</span></label>
+                    <input type="text" placeholder="例如：东大门摄像头" bind:value={deviceFormData.name} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div class="flex space-x-4">
+                    <div class="flex-1">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">IP 地址 <span class="text-red-500">*</span></label>
+                        <input type="text" placeholder="192.168.1.10" bind:value={deviceFormData.ip} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div class="w-32">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">端口</label>
+                        <input type="text" placeholder="80" bind:value={deviceFormData.port} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">用户名</label>
+                    <input type="text" placeholder="admin" bind:value={deviceFormData.username} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">密码</label>
+                    <input type="password" placeholder="请输入密码" bind:value={deviceFormData.password} class="w-full px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
             </div>
             <div class="px-6 py-4 border-t flex justify-end space-x-3 bg-gray-50">
                 <button on:click={() => isDeviceModalOpen = false} class="px-4 py-2 border rounded-lg">取消</button>
