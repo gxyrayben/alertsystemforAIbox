@@ -50,8 +50,11 @@ class LLMConfig(BaseModel):
 
 class TaskBase(BaseModel):
     name: str
-    task_type: str = "区域告警"
+    task_type: str = "警戒分析"
     device_id: str
+    device_task: str = ""
+    channel: str = ""
+    algorithms: str = "[]"
     status: str = "未布控"
     assignee: str = ""
     priority: str = "中"
@@ -64,6 +67,7 @@ class TaskUpdate(BaseModel):
     name: Optional[str] = None
     task_type: Optional[str] = None
     device_id: Optional[str] = None
+    device_task: Optional[str] = None
     channel: Optional[str] = None
     algorithms: Optional[str] = None
     status: Optional[str] = None

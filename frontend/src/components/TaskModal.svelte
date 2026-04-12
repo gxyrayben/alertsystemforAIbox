@@ -13,6 +13,7 @@
         name: '',
         task_type: 'Prompt调优',
         device_id: '',
+        device_task: '',
         channel: '',
         algorithms: '[]',
         status: '未布控', // hardcoded internally
@@ -24,8 +25,9 @@
     const taskTypes = ['Prompt调优', '警戒分析'];
     const priorities = ['高', '中', '低'];
     const mockChannels = ['CH01 (主入口)', 'CH02 (次入口)', 'CH03 (周边)', 'CH04 (室内)'];
+    const mockDeviceTasks = ['默认巡检任务', '周界防御布控', '重点区域抓拍', '全天候行为分析'];
     
-    // Default algorithms, but we will mock fetching from device
+    // Default algorithms
     const defaultAlgorithms = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测', '异常离岗'];
     let availableAlgorithms = [];
 
@@ -39,18 +41,17 @@
         selectedAlgorithms = [];
     }
 
-    // Dynamic list of channels based on selected device (mock)
+    // Dynamic list of channels and device tasks based on selected device (mock)
     $: availableChannels = formData.device_id ? mockChannels : [];
+    $: availableDeviceTasks = formData.device_id ? mockDeviceTasks : [];
     
-    // Calculate related tasks based on selected device and channel
-    $: relatedTasks = (formData.device_id && formData.channel) 
+    // Calculate related tasks (existing system tasks) based on selected device and channel
+    $: systemRelatedTasks = (formData.device_id && formData.channel) 
         ? tasks.filter(t => t.device_id === formData.device_id && t.channel === formData.channel && t.id !== formData.id) 
         : [];
 
     // Mock fetching algorithms from the selected device
     $: if (formData.device_id) {
-        // Here you would normally fetch from API based on device_id
-        // For now we simulate that different devices might have different algorithms
         const deviceHash = formData.device_id.charCodeAt(0) % 2;
         availableAlgorithms = deviceHash === 0 
             ? defaultAlgorithms.slice(0, 4) 
@@ -83,7 +84,7 @@
             return;
         }
         
-        // Update formData before dispatching
+        // Update formData algorithms string before dispatching
         formData.algorithms = JSON.stringify(selectedAlgorithms);
         
         dispatch('save', formData);
@@ -140,6 +141,17 @@
                         {/each}
                     </select>
                 </div>
+
+                <!-- 关联任务 (Device Task) -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="deviceTask">关联任务</label>
+                    <select id="deviceTask" bind:value={formData.device_task} disabled={!formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-slate-100 disabled:text-slate-500 bg-white">
+                        <option value="">{formData.device_id ? '请选择关联任务' : '请先选择设备'}</option>
+                        {#each availableDeviceTasks as dtask}
+                            <option value={dtask}>{dtask}</option>
+                        {/each}
+                    </select>
+                </div>
                 
                 <!-- 关联通道 -->
                 <div>
@@ -148,6 +160,16 @@
                         <option value="">{formData.device_id ? '请选择通道' : '请先选择设备'}</option>
                         {#each availableChannels as channel}
                             <option value={channel}>{channel}</option>
+                        {/each}
+                    </select>
+                </div>
+
+                <!-- 优先级 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="priority">优先级</label>
+                    <select id="priority" bind:value={formData.priority} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
+                        {#each priorities as priority}
+                            <option value={priority}>{priority}</option>
                         {/each}
                     </select>
                 </div>
@@ -186,39 +208,29 @@
                         </div>
                     {/if}
                 </div>
-
-                <!-- 优先级 -->
-                <div>
-                    <label class="block text-sm font-medium text-slate-700 mb-1.5" for="priority">优先级</label>
-                    <select id="priority" bind:value={formData.priority} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
-                        {#each priorities as priority}
-                            <option value={priority}>{priority}</option>
-                        {/each}
-                    </select>
-                </div>
                 
                 <!-- 负责人 -->
-                <div>
+                <div class="col-span-1 md:col-span-2">
                     <label class="block text-sm font-medium text-slate-700 mb-1.5" for="assignee">负责人</label>
                     <input id="assignee" type="text" bind:value={formData.assignee} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow" placeholder="例如：张三" />
                 </div>
             </div>
 
-            <!-- 关联任务信息展示 -->
+            <!-- 关联任务信息展示 (现有系统布控提醒) -->
             {#if formData.device_id && formData.channel}
                 <div class="mt-6 bg-blue-50/50 rounded-lg p-4 border border-blue-100">
                     <h4 class="text-sm font-medium text-blue-900 mb-2 flex items-center">
                         <svg class="w-4 h-4 mr-1.5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        该通道下已关联的任务：
+                        该通道下已绑定的系统任务：
                     </h4>
-                    {#if relatedTasks.length > 0}
+                    {#if systemRelatedTasks.length > 0}
                         <ul class="list-disc list-inside text-sm text-blue-700 pl-4 space-y-1.5">
-                            {#each relatedTasks as rt}
+                            {#each systemRelatedTasks as rt}
                                 <li>{rt.name} <span class="text-blue-500/70 ml-1">({rt.task_type})</span></li>
                             {/each}
                         </ul>
                     {:else}
-                        <p class="text-sm text-blue-600/70 pl-5">暂无其他任务关联此通道。</p>
+                        <p class="text-sm text-blue-600/70 pl-5">暂无其他系统任务关联此通道。</p>
                     {/if}
                 </div>
             {/if}

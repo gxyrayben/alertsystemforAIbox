@@ -29,6 +29,7 @@ class TaskORM(Base):
     name = Column(String, nullable=False)
     task_type = Column(String, default="警戒分析")
     device_id = Column(String, index=True)
+    device_task = Column(String, default="")
     channel = Column(String, default="")
     algorithms = Column(String, default="[]")
     status = Column(String, default="未布控")
