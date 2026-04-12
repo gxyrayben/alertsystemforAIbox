@@ -24,14 +24,8 @@
     
     const taskTypes = ['Prompt调优', '警戒分析'];
     const priorities = ['高', '中', '低'];
-    const mockChannels = ['CH01 (主入口)', 'CH02 (次入口)', 'CH03 (周边)', 'CH04 (室内)'];
-    const mockDeviceTasks = ['默认巡检任务', '周界防御布控', '重点区域抓拍', '全天候行为分析'];
     
-    // Default algorithms
-    const defaultAlgorithms = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测', '异常离岗'];
-    let availableAlgorithms = [];
-
-    // parse JSON array string for algorithms
+    // State for algorithms
     let selectedAlgorithms = [];
     try {
         if (formData.algorithms) {
@@ -41,30 +35,40 @@
         selectedAlgorithms = [];
     }
 
-    // Dynamic list of channels and device tasks based on selected device (mock)
-    $: availableChannels = formData.device_id ? mockChannels : [];
-    $: availableDeviceTasks = formData.device_id ? mockDeviceTasks : [];
+    // Reactively find the selected device object
+    $: selectedDevice = devices.find(d => d.device_id === formData.device_id);
+
+    // Get dynamic options from the selected device data
+    $: availableDeviceTasks = selectedDevice ? parseJson(selectedDevice.device_tasks) : [];
     
-    // Calculate related tasks (existing system tasks) based on selected device and channel
+    // Find the selected device task object to get its associated channels
+    $: selectedDeviceTaskObj = availableDeviceTasks.find(t => t.task_name === formData.device_task);
+    
+    // Filter channels: if a task is selected, show only channels associated with that task. 
+    // Otherwise show all channels of the device.
+    $: availableChannels = selectedDevice 
+        ? (selectedDeviceTaskObj 
+            ? selectedDeviceTaskObj.device_name.split(',').map(s => s.trim())
+            : parseJson(selectedDevice.channels).map(c => c.device_name))
+        : [];
+    
+    $: availableAlgorithms = selectedDevice ? parseJson(selectedDevice.available_algorithms) : [];
+    
+    // Calculate related system tasks (existing in our DB) based on selected device and channel
     $: systemRelatedTasks = (formData.device_id && formData.channel) 
         ? tasks.filter(t => t.device_id === formData.device_id && t.channel === formData.channel && t.id !== formData.id) 
         : [];
 
-    // Mock fetching algorithms from the selected device
+    // Reset channel/task/algorithms if device changes and previously selected items are no longer valid
     $: if (formData.device_id) {
-        const deviceHash = formData.device_id.charCodeAt(0) % 2;
-        availableAlgorithms = deviceHash === 0 
-            ? defaultAlgorithms.slice(0, 4) 
-            : defaultAlgorithms;
-        
-        // Remove selected algorithms that are no longer available for this device
-        selectedAlgorithms = selectedAlgorithms.filter(alg => availableAlgorithms.includes(alg));
-    } else {
-        availableAlgorithms = [];
-        selectedAlgorithms = [];
+        // Validation check could go here, but usually users want to keep selections if they match
     }
 
     let showAlgDropdown = false;
+
+    function parseJson(str) {
+        try { return JSON.parse(str || '[]'); } catch(e) { return []; }
+    }
 
     function toggleAlgorithm(alg) {
         if (selectedAlgorithms.includes(alg)) {
@@ -148,7 +152,7 @@
                     <select id="deviceTask" bind:value={formData.device_task} disabled={!formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-slate-100 disabled:text-slate-500 bg-white">
                         <option value="">{formData.device_id ? '请选择关联任务' : '请先选择设备'}</option>
                         {#each availableDeviceTasks as dtask}
-                            <option value={dtask}>{dtask}</option>
+                            <option value={dtask.task_name}>{dtask.task_name}</option>
                         {/each}
                     </select>
                 </div>
@@ -216,7 +220,7 @@
                 </div>
             </div>
 
-            <!-- 关联任务信息展示 (现有系统布控提醒) -->
+            <!-- 关联任务信息展示 -->
             {#if formData.device_id && formData.channel}
                 <div class="mt-6 bg-blue-50/50 rounded-lg p-4 border border-blue-100">
                     <h4 class="text-sm font-medium text-blue-900 mb-2 flex items-center">

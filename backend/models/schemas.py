@@ -10,6 +10,9 @@ class Device(BaseModel):
     username: Optional[str] = ""
     password: Optional[str] = ""
     status: Optional[str] = "离线"
+    channels: Optional[str] = "[]"
+    device_tasks: Optional[str] = "[]"
+    available_algorithms: Optional[str] = "[]"
 
 class Alert(BaseModel):
     id: Optional[str] = None

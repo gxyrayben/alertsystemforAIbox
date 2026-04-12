@@ -11,6 +11,9 @@ class DeviceORM(Base):
     username = Column(String, default="")
     password = Column(String, default="")
     status = Column(String, default="离线")
+    channels = Column(String, default="[]")
+    device_tasks = Column(String, default="[]")
+    available_algorithms = Column(String, default="[]")
 
 class AlertORM(Base):
     __tablename__ = "alerts"
