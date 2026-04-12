@@ -52,16 +52,37 @@
             : parseJson(selectedDevice.channels).map(c => c.device_name))
         : [];
     
-    $: availableAlgorithms = selectedDevice ? parseJson(selectedDevice.available_algorithms) : [];
+    // Filter algorithms: show only algorithms enabled in the selected device task.
+    // If no task is selected, show nothing or placeholder.
+    $: availableAlgorithms = (selectedDevice && selectedDeviceTaskObj)
+        ? selectedDeviceTaskObj.agent_id.split(',').map(s => s.trim()).filter(s => s !== '')
+        : [];
     
     // Calculate related system tasks (existing in our DB) based on selected device and channel
     $: systemRelatedTasks = (formData.device_id && formData.channel) 
         ? tasks.filter(t => t.device_id === formData.device_id && t.channel === formData.channel && t.id !== formData.id) 
         : [];
 
-    // Reset channel/task/algorithms if device changes and previously selected items are no longer valid
-    $: if (formData.device_id) {
-        // Validation check could go here, but usually users want to keep selections if they match
+    // Reset dependent fields when device changes
+    let lastDeviceId = formData.device_id;
+    $: if (formData.device_id !== lastDeviceId) {
+        lastDeviceId = formData.device_id;
+        formData.device_task = '';
+        formData.channel = '';
+        selectedAlgorithms = [];
+    }
+
+    // Reset algorithms when task changes
+    let lastDeviceTask = formData.device_task;
+    $: if (formData.device_task !== lastDeviceTask) {
+        lastDeviceTask = formData.device_task;
+        selectedAlgorithms = [];
+        // Auto-select channel if there's only one in the task
+        if (availableChannels.length === 1) {
+            formData.channel = availableChannels[0];
+        } else {
+            formData.channel = '';
+        }
     }
 
     let showAlgDropdown = false;
@@ -188,7 +209,7 @@
                         on:click={() => showAlgDropdown = !showAlgDropdown}
                     >
                         <span class="truncate text-slate-700">
-                            {!formData.device_id ? '请先选择设备获取算法列表' : (selectedAlgorithms.length ? selectedAlgorithms.join(', ') : '请选择智能体算法')}
+                            {!formData.device_id ? '请先选择设备' : (!formData.device_task ? '请先选择关联任务' : (selectedAlgorithms.length ? selectedAlgorithms.join(', ') : '请选择智能体算法'))}
                         </span>
                         <svg class="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
                     </button>
