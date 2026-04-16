@@ -5,10 +5,11 @@ import os
 import json
 import httpx
 import hashlib
+import uuid
 from sqlalchemy.future import select
 
 from models.db import AsyncSessionLocal
-from models.orm import TaskORM, DeviceORM, AlertORM
+from models.orm import TaskORM, DeviceORM, AlertORM, LogORM
 import database
 
 async def do_login(client, base_url, device_obj, db_session):
@@ -193,6 +194,23 @@ async def process_tuning_task(task_obj, db_session):
         except Exception as e:
             print(f"Auto-tune LLM failed for task {task_obj.id}: {e}")
             pass # Do not update timestamp, retry next time
+
+async def run_auto_tune_cycle():
+    async with AsyncSessionLocal() as session:
+        # Find all active "Prompt调优" tasks
+        query = select(TaskORM).where(
+            TaskORM.task_type == "Prompt调优",
+            TaskORM.status.in_(["布控中", "运行中", "未布控"])
+        )
+        result = await session.execute(query)
+        tasks = result.scalars().all()
+
+        for task in tasks:
+            try:
+                await process_tuning_task(task, session)
+            except Exception as e:
+                print(f"Error processing auto-tune for task {task.id}: {e}")
+pass # Do not update timestamp, retry next time
 
 async def run_auto_tune_cycle():
     async with AsyncSessionLocal() as session:
