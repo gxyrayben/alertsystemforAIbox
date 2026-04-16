@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("PRAGMA cache_size=-64000;"))
         
     scheduler.add_job(clean_old_alerts, IntervalTrigger(hours=1), id="clean_old_alerts")
+    scheduler.add_job(run_auto_tune_cycle, IntervalTrigger(seconds=60), id="run_auto_tune_cycle")
     scheduler.start()
     
     # 启动动态的 WS 和 HTTP 报警服务
