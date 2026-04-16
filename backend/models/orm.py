@@ -41,6 +41,7 @@ class TaskORM(Base):
     priority = Column(String, default="中")
     due_date = Column(BigInteger, nullable=True)
     created_at = Column(BigInteger, nullable=False)
+    last_processed_time = Column(BigInteger, default=0)
 
 class LogORM(Base):
     __tablename__ = "logs"

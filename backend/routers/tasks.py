@@ -35,10 +35,12 @@ async def list_tasks(page: int = Query(1, ge=1), size: int = Query(10, ge=1), db
 @router.post("", response_model=TaskResponse)
 async def create_task(task: TaskCreate, db: AsyncSession = Depends(get_db)):
     task_id = f"TASK-{str(uuid.uuid4())[:8].upper()}"
+    current_time = int(time.time() * 1000)
     new_task = TaskORM(
         id=task_id,
         **task.model_dump(),
-        created_at=int(time.time() * 1000)
+        created_at=current_time,
+        last_processed_time=current_time
     )
     db.add(new_task)
     await db.commit()
