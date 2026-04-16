@@ -21,6 +21,21 @@
     let aiLoadingIds = {};
     const alertTypes = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测'];
 
+    // 分页状态
+    let currentPage = 1;
+    const itemsPerPage = 12;
+    $: totalPages = Math.ceil(displayedAlerts.length / itemsPerPage);
+    $: paginatedAlerts = displayedAlerts.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
+    // 图片查看器状态
+    let viewerImage = null;
+    function openViewer(url) {
+        viewerImage = url;
+    }
+    function closeViewer() {
+        viewerImage = null;
+    }
+
     onMount(async () => {
         await fetchAlerts();
     });
@@ -34,7 +49,10 @@
             if (alertFilters.endDate) params.append('endDate', alertFilters.endDate);
 
             const res = await fetch(`${API_BASE}/alerts?${params.toString()}`);
-            if (res.ok) displayedAlerts = await res.json();
+            if (res.ok) {
+                displayedAlerts = await res.json();
+                currentPage = 1;
+            }
         } catch (e) { console.error(e); }
     }
 
@@ -106,11 +124,11 @@
     <div class="flex-1 overflow-auto pb-4">
         {#if displayedAlerts.length > 0}
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                {#each displayedAlerts as alert}
+                {#each paginatedAlerts as alert}
                     <div class="bg-white rounded-xl overflow-hidden shadow-sm border flex flex-col">
-                        <div class="relative aspect-video bg-gray-100 flex items-center justify-center border-b overflow-hidden">
+                        <div class="relative aspect-video bg-gray-100 flex items-center justify-center border-b overflow-hidden group">
                             {#if alert.imageUrl}
-                                <img src="{API_BASE}{alert.imageUrl}" alt="抓拍图片" class="w-full h-full object-cover object-center" />
+                                <img src="{API_BASE}{alert.imageUrl}" alt="抓拍图片" class="w-full h-full object-cover object-center cursor-zoom-in transition-transform duration-300 group-hover:scale-105" on:dblclick={() => openViewer(`${API_BASE}${alert.imageUrl}`)} title="双击查看大图" />
                             {:else}
                                 <div class="flex flex-col items-center text-gray-400">
                                     <Icon name="Camera" className="w-10 h-10 mb-2 opacity-50" />
@@ -130,14 +148,49 @@
                                         {aiLoadingIds[alert.id] ? 'AI思考中' : 'AI 分析'}
                                     </button>
                                 </div>
-                                <p class="text-sm text-gray-700 min-h-[40px] bg-gray-50 p-2 rounded-md">{alert.remark}</p>
+                                <p class="text-sm text-gray-700 min-h-[40px] bg-gray-50 p-2 rounded-md cursor-default" title={alert.remark || ''}>
+                                    {alert.remark ? (alert.remark.length > 24 ? alert.remark.slice(0, 24) + '...' : alert.remark) : ''}
+                                </p>
                             </div>
                         </div>
                     </div>
                 {/each}
             </div>
+            
+            {#if totalPages > 1}
+            <div class="flex justify-center items-center space-x-4 mt-8 pb-4">
+                <button 
+                    disabled={currentPage === 1} 
+                    on:click={() => currentPage--} 
+                    class="px-4 py-2 rounded-lg border bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium text-gray-700 flex items-center shadow-sm"
+                >
+                    <Icon name="ChevronLeft" className="w-4 h-4 mr-1" /> 上一页
+                </button>
+                <span class="text-sm font-medium text-gray-600">第 {currentPage} 页 / 共 {totalPages} 页</span>
+                <button 
+                    disabled={currentPage === totalPages} 
+                    on:click={() => currentPage++} 
+                    class="px-4 py-2 rounded-lg border bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium text-gray-700 flex items-center shadow-sm"
+                >
+                    下一页 <Icon name="ChevronRight" className="w-4 h-4 ml-1" />
+                </button>
+            </div>
+            {/if}
         {:else}
             <div class="h-full flex flex-col items-center justify-center text-gray-400"><Icon name="Search" className="w-16 h-16 mb-4 opacity-30" /><p>未检索到相关的预警抓拍数据</p></div>
         {/if}
     </div>
 </div>
+
+{#if viewerImage}
+<!-- svelte-ignore a11y-click-events-have-key-events -->
+<!-- svelte-ignore a11y-no-static-element-interactions -->
+<div class="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm" on:click={closeViewer}>
+    <div class="relative max-w-[90vw] max-h-[90vh]">
+        <img src={viewerImage} alt="大图" class="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl" on:click|stopPropagation />
+        <button class="absolute -top-12 right-0 text-white/70 hover:text-white transition-colors" on:click={closeViewer} title="关闭">
+            <Icon name="X" className="w-8 h-8" />
+        </button>
+    </div>
+</div>
+{/if}

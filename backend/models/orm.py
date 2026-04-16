@@ -11,6 +11,7 @@ class DeviceORM(Base):
     username = Column(String, default="")
     password = Column(String, default="")
     status = Column(String, default="离线")
+    session_id = Column(String, default="")
     channels = Column(String, default="[]")
     device_tasks = Column(String, default="[]")
     available_algorithms = Column(String, default="[]")

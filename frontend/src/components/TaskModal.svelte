@@ -63,19 +63,13 @@
         ? tasks.filter(t => t.device_id === formData.device_id && t.channel === formData.channel && t.id !== formData.id) 
         : [];
 
-    // Reset dependent fields when device changes
-    let lastDeviceId = formData.device_id;
-    $: if (formData.device_id !== lastDeviceId) {
-        lastDeviceId = formData.device_id;
+    function handleDeviceChange() {
         formData.device_task = '';
         formData.channel = '';
         selectedAlgorithms = [];
     }
 
-    // Reset algorithms when task changes
-    let lastDeviceTask = formData.device_task;
-    $: if (formData.device_task !== lastDeviceTask) {
-        lastDeviceTask = formData.device_task;
+    function handleDeviceTaskChange() {
         selectedAlgorithms = [];
         // Auto-select channel if there's only one in the task
         if (availableChannels.length === 1) {
@@ -112,7 +106,12 @@
         // Update formData algorithms string before dispatching
         formData.algorithms = JSON.stringify(selectedAlgorithms);
         
-        dispatch('save', formData);
+        const payload = { ...formData };
+        if (payload.due_date === '') {
+            payload.due_date = null;
+        }
+        
+        dispatch('save', payload);
     }
     
     function handleCancel() {
@@ -159,7 +158,7 @@
                 <!-- 关联设备 -->
                 <div>
                     <label class="block text-sm font-medium text-slate-700 mb-1.5" for="deviceId">关联设备 <span class="text-red-500">*</span></label>
-                    <select id="deviceId" bind:value={formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
+                    <select id="deviceId" bind:value={formData.device_id} on:change={handleDeviceChange} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow bg-white">
                         <option value="">请选择设备</option>
                         {#each devices as device}
                             <option value={device.device_id}>{device.name} ({device.device_id})</option>
@@ -170,7 +169,7 @@
                 <!-- 关联任务 (Device Task) -->
                 <div>
                     <label class="block text-sm font-medium text-slate-700 mb-1.5" for="deviceTask">关联任务</label>
-                    <select id="deviceTask" bind:value={formData.device_task} disabled={!formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-slate-100 disabled:text-slate-500 bg-white">
+                    <select id="deviceTask" bind:value={formData.device_task} on:change={handleDeviceTaskChange} disabled={!formData.device_id} class="w-full h-10 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow disabled:bg-slate-100 disabled:text-slate-500 bg-white">
                         <option value="">{formData.device_id ? '请选择关联任务' : '请先选择设备'}</option>
                         {#each availableDeviceTasks as dtask}
                             <option value={dtask.task_name}>{dtask.task_name}</option>
