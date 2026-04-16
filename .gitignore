@@ -31,3 +31,4 @@ backend/test_payload.json
 .idea/
 .vscode/
 *.swp
+.worktrees/
