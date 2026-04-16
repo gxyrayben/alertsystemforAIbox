@@ -22,7 +22,8 @@
         'services': '服务管理',
         'network': '网络配置',
         'llm': '模型配置',
-        'sessions': '会话管理'
+        'sessions': '会话管理',
+        'logs': '日志管理'
     };
 
     function handleMenuSelect(event) {

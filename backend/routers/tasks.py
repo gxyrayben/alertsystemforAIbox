@@ -12,7 +12,7 @@ import httpx
 import hashlib
 
 from models.db import get_db
-from models.orm import TaskORM, DeviceORM, AlertORM
+from models.orm import TaskORM, DeviceORM, AlertORM, LogORM
 from models.schemas import TaskCreate, TaskUpdate, TaskResponse
 import database
 
@@ -263,6 +263,20 @@ async def auto_tune_task(task_id: str, db: AsyncSession = Depends(get_db)):
             update_payload = target_device_task
             
             put_res = await client.put(f"{base_url}/intelli_manager/task", json=update_payload)
+            
+            log_id = f"LOG-{str(uuid.uuid4())[:8].upper()}"
+            new_log = LogORM(
+                id=str(uuid.uuid4()),
+                log_id=log_id,
+                device_name=device_obj.name,
+                api_path="PUT /intelli_manager/task (Prompt Optimization)",
+                parameters=optimized_prompt,
+                result="成功" if put_res.status_code == 200 and put_res.json().get("code") == 0 else f"失败: {put_res.text}",
+                timestamp=int(time.time() * 1000)
+            )
+            db.add(new_log)
+            await db.commit()
+
             if put_res.status_code == 200 and put_res.json().get("code") == 0:
                 updated = True
             else:
