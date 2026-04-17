@@ -13,6 +13,7 @@ from routers import devices, alerts, network, services, chat, llm, tasks, logs
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
 import services_manager
+from services.auto_tune_worker import run_auto_tune_cycle
 
 scheduler = AsyncIOScheduler()
 
