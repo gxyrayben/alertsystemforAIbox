@@ -12,6 +12,22 @@ from models.db import AsyncSessionLocal
 from models.orm import TaskORM, DeviceORM, AlertORM, LogORM
 import database
 
+
+def build_intelli_manager_task_update_payload(task_obj: dict) -> dict:
+    """Build a minimal update payload for PUT /intelli_manager/task."""
+    allowed_fields = [
+        "task_id",
+        "task_name",
+        "task_type",
+        "device_list",
+        "enable",
+        "schedule_plan_id",
+        "analysis_interval",
+        "agent_list",
+    ]
+    return {k: task_obj[k] for k in allowed_fields if k in task_obj}
+
+
 async def do_login(client, base_url, device_obj, db_session):
     challenge_res = await client.get(f"{base_url}/auth/login/challenge", params={"username": device_obj.username})
     if challenge_res.status_code == 200 and challenge_res.json().get("code") == 0:
@@ -183,7 +199,8 @@ async def process_tuning_task(task_obj, db_session):
 
                 if is_false_positive and optimized_prompt and optimized_prompt != current_prompt:
                     target_agent["agent_config"]["prompt"] = optimized_prompt
-                    put_res = await client.put(f"{base_url}/intelli_manager/task", json=target_device_task)
+                    update_payload = build_intelli_manager_task_update_payload(target_device_task)
+                    put_res = await client.put(f"{base_url}/intelli_manager/task", json=update_payload)
                     if put_res.status_code == 200 and put_res.json().get("code") == 0:
                         pass # Successfully updated
 

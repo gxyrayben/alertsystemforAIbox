@@ -16,6 +16,22 @@ from models.orm import TaskORM, DeviceORM, AlertORM, LogORM
 from models.schemas import TaskCreate, TaskUpdate, TaskResponse
 import database
 
+
+def build_intelli_manager_task_update_payload(task_obj: dict) -> dict:
+    """Build a minimal update payload for PUT /intelli_manager/task."""
+    allowed_fields = [
+        "task_id",
+        "task_name",
+        "task_type",
+        "device_list",
+        "enable",
+        "schedule_plan_id",
+        "analysis_interval",
+        "agent_list",
+    ]
+    return {k: task_obj[k] for k in allowed_fields if k in task_obj}
+
+
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 @router.get("")
@@ -260,7 +276,7 @@ async def auto_tune_task(task_id: str, db: AsyncSession = Depends(get_db)):
         if is_false_positive and optimized_prompt and optimized_prompt != current_prompt:
             target_agent["agent_config"]["prompt"] = optimized_prompt
             
-            update_payload = target_device_task
+            update_payload = build_intelli_manager_task_update_payload(target_device_task)
             
             put_res = await client.put(f"{base_url}/intelli_manager/task", json=update_payload)
             
