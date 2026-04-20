@@ -195,7 +195,9 @@ async def process_tuning_task(task_obj, db_session):
         llm_url = f"{llm_config['base_url'].rstrip('/')}/chat/completions"
 
         try:
-            llm_res = await client.post(llm_url, headers=headers, json=llm_payload, timeout=60.0)
+            async with httpx.AsyncClient(timeout=60.0) as llm_client:
+                llm_res = await llm_client.post(llm_url, headers=headers, json=llm_payload)
+
             if llm_res.status_code == 200:
                 llm_data = llm_res.json()
                 content_str = llm_data["choices"][0]["message"]["content"].strip()
@@ -212,33 +214,28 @@ async def process_tuning_task(task_obj, db_session):
                     target_agent["agent_config"]["prompt"] = optimized_prompt
                     update_payload = build_intelli_manager_task_update_payload(target_device_task)
                     put_res = await client.put(f"{base_url}/intelli_manager/task", json=update_payload)
-                    if put_res.status_code == 200 and put_res.json().get("code") == 0:
-                        pass # Successfully updated
+                    
+                    log_id = f"LOG-{str(uuid.uuid4())[:8].upper()}"
+                    new_log = LogORM(
+                        id=str(uuid.uuid4()),
+                        log_id=log_id,
+                        device_name=device_obj.name,
+                        api_path="PUT /intelli_manager/task (Prompt Optimization)",
+                        parameters=optimized_prompt,
+                        result="成功" if put_res.status_code == 200 and put_res.json().get("code") == 0 else f"失败: {put_res.text}",
+                        timestamp=int(time.time() * 1000)
+                    )
+                    db_session.add(new_log)
 
                 # Always update timestamp if LLM succeeded
                 task_obj.last_processed_time = max_timestamp
                 await db_session.commit()
                 print(f"Auto-tune completed for task {task_obj.id}, new cursor: {max_timestamp}")
+            else:
+                print(f"[AutoTune] LLM returned non-200 for task {task_obj.id}: {llm_res.status_code} - {llm_res.text}")
         except Exception as e:
             print(f"Auto-tune LLM failed for task {task_obj.id}: {e}")
             pass # Do not update timestamp, retry next time
-
-async def run_auto_tune_cycle():
-    async with AsyncSessionLocal() as session:
-        # Find all active "Prompt调优" tasks
-        query = select(TaskORM).where(
-            TaskORM.task_type == "Prompt调优",
-            TaskORM.status.in_(["布控中", "运行中", "未布控"])
-        )
-        result = await session.execute(query)
-        tasks = result.scalars().all()
-
-        for task in tasks:
-            try:
-                await process_tuning_task(task, session)
-            except Exception as e:
-                print(f"Error processing auto-tune for task {task.id}: {e}")
-pass # Do not update timestamp, retry next time
 
 async def run_auto_tune_cycle():
     async with AsyncSessionLocal() as session:
