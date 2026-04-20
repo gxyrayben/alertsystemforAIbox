@@ -25,7 +25,18 @@ def build_intelli_manager_task_update_payload(task_obj: dict) -> dict:
         "analysis_interval",
         "agent_list",
     ]
-    return {k: task_obj[k] for k in allowed_fields if k in task_obj}
+    payload = {k: task_obj[k] for k in allowed_fields if k in task_obj}
+    
+    # 修复物理设备的特定约束（从设备拉取可能是 0，但下发必须在 1~10 之间）
+    if "device_list" in payload:
+        for dev in payload["device_list"]:
+            if "image_extract_frame_interval" in dev:
+                if dev["image_extract_frame_interval"] < 1:
+                    dev["image_extract_frame_interval"] = 1
+                elif dev["image_extract_frame_interval"] > 10:
+                    dev["image_extract_frame_interval"] = 10
+                    
+    return payload
 
 
 async def do_login(client, base_url, device_obj, db_session):
