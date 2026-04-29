@@ -12,7 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from routers import devices, alerts, network, services, chat, llm, tasks, logs
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
-import services_manager
+from services import alarm_services
 from services.auto_tune_worker import run_auto_tune_cycle
 
 scheduler = AsyncIOScheduler()
@@ -55,12 +55,12 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     
     # 启动动态的 WS 和 HTTP 报警服务
-    await services_manager.init_services()
+    await alarm_services.init_services()
     
     yield
     
     # 关闭动态服务
-    await services_manager.shutdown_services()
+    await alarm_services.shutdown_services()
     scheduler.shutdown()
 
 app = FastAPI(title="安防综合管理平台 API", lifespan=lifespan)
