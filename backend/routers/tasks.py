@@ -31,14 +31,14 @@ def build_intelli_manager_task_update_payload(task_obj: dict) -> dict:
     ]
     payload = {k: task_obj[k] for k in allowed_fields if k in task_obj}
     
-    # 修复物理设备的特定约束（从设备拉取可能是 0，但下发必须在 1~10 之间）
+    # 修复物理设备的特定约束（从设备拉取可能是 0，但下发必须在 1s~10s 之间，单位为 ms）
     if "device_list" in payload:
         for dev in payload["device_list"]:
             if "image_extract_frame_interval" in dev:
-                if dev["image_extract_frame_interval"] < 1:
-                    dev["image_extract_frame_interval"] = 1
-                elif dev["image_extract_frame_interval"] > 10:
-                    dev["image_extract_frame_interval"] = 10
+                if dev["image_extract_frame_interval"] < 1000:
+                    dev["image_extract_frame_interval"] = 1000
+                elif dev["image_extract_frame_interval"] > 10000:
+                    dev["image_extract_frame_interval"] = 10000
                     
     return payload
 
@@ -121,25 +121,28 @@ async def auto_tune_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if not device_obj:
         raise HTTPException(status_code=404, detail="关联设备不存在")
 
-    query = select(AlertORM).where(AlertORM.deviceName == device_obj.name).where(AlertORM.imageUrl != None).order_by(AlertORM.timestamp.desc()).limit(1)
+    query = select(AlertORM).where(AlertORM.deviceName == device_obj.name).where(AlertORM.imageUrl != None).order_by(AlertORM.timestamp.desc()).limit(10)
     result = await db.execute(query)
-    alert_obj = result.scalars().first()
-    if not alert_obj:
+    alerts = result.scalars().all()
+    if not alerts:
         raise HTTPException(status_code=404, detail="未找到该设备相关的含有图片的告警记录")
 
-    img_path = alert_obj.imageUrl
-    if img_path.startswith("/"):
-        img_path = img_path[1:]
-    
-    if not os.path.exists(img_path):
-        raise HTTPException(status_code=404, detail="告警图片文件在磁盘上丢失")
+    encoded_images = []
+    for alert_obj in alerts:
+        img_path = alert_obj.imageUrl
+        if img_path.startswith("/"):
+            img_path = img_path[1:]
+        
+        if os.path.exists(img_path):
+            with open(img_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                mime_type = "image/jpeg"
+                if img_path.endswith(".png"):
+                    mime_type = "image/png"
+                encoded_images.append({"url": f"data:{mime_type};base64,{img_b64}"})
 
-    with open(img_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode('utf-8')
-
-    mime_type = "image/jpeg"
-    if img_path.endswith(".png"):
-        mime_type = "image/png"
+    if not encoded_images:
+        raise HTTPException(status_code=404, detail="告警图片文件在磁盘上全部丢失")
 
     base_url = f"http://{device_obj.ip}:{device_obj.port}"
     session_id = device_obj.session_id
@@ -218,9 +221,9 @@ async def auto_tune_task(task_id: str, db: AsyncSession = Depends(get_db)):
 设备目前使用的识别提示词(Prompt)是：
 {current_prompt}
 
-请观察用户提供的最新『告警抓拍图』。
-1. 判断这张图是否是**误报**（False Positive）？
-2. 如果是误报，请分析原因（如反光、形状相似等），并输出一段**全新优化后的 Prompt**，在原基础上增加排除这些干扰项的描述。如果不希望修改或者并非误报，请在optimized_prompt保持原样。
+请观察用户提供的最新 {len(encoded_images)} 张『告警抓拍图』。
+1. 综合判断这些图中是否存在**误报**（False Positive）？
+2. 如果存在误报，请分析原因（如反光、形状相似等），并输出一段**全新优化后的 Prompt**，在原基础上增加排除这些干扰项的描述。如果不希望修改或者并非误报，请在optimized_prompt保持原样。
 
 请严格以 JSON 格式返回：
 {{
@@ -229,18 +232,11 @@ async def auto_tune_task(task_id: str, db: AsyncSession = Depends(get_db)):
     "optimized_prompt": "新的提示词内容..."
 }}
 """
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_instruction},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{img_b64}"}
-                    }
-                ]
-            }
-        ]
+        content_array = [{"type": "text", "text": prompt_instruction}]
+        for img in encoded_images:
+            content_array.append({"type": "image_url", "image_url": img})
+
+        messages = [{"role": "user", "content": content_array}]
 
         llm_payload = {
             "model": llm_config["model_name"],

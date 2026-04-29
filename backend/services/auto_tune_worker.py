@@ -27,14 +27,14 @@ def build_intelli_manager_task_update_payload(task_obj: dict) -> dict:
     ]
     payload = {k: task_obj[k] for k in allowed_fields if k in task_obj}
     
-    # 修复物理设备的特定约束（从设备拉取可能是 0，但下发必须在 1~10 之间）
+    # 修复物理设备的特定约束（从设备拉取可能是 0，但下发必须在 1s~10s 之间，单位为 ms）
     if "device_list" in payload:
         for dev in payload["device_list"]:
             if "image_extract_frame_interval" in dev:
-                if dev["image_extract_frame_interval"] < 1:
-                    dev["image_extract_frame_interval"] = 1
-                elif dev["image_extract_frame_interval"] > 10:
-                    dev["image_extract_frame_interval"] = 10
+                if dev["image_extract_frame_interval"] < 1000:
+                    dev["image_extract_frame_interval"] = 1000
+                elif dev["image_extract_frame_interval"] > 10000:
+                    dev["image_extract_frame_interval"] = 10000
                     
     return payload
 
@@ -80,19 +80,19 @@ async def process_tuning_task(task_obj, db_session):
     if not device_obj:
         return
 
-    # Get 5 newest alerts after last_processed_time
+    # Get 10 newest alerts after last_processed_time
     query = select(AlertORM).where(
         AlertORM.deviceName == device_obj.name,
         AlertORM.alertType == target_agent_id,
         AlertORM.imageUrl != None,
         AlertORM.timestamp > (task_obj.last_processed_time or 0)
-    ).order_by(AlertORM.timestamp.asc()).limit(5)
+    ).order_by(AlertORM.timestamp.asc()).limit(10)
     
     result = await db_session.execute(query)
     alerts = result.scalars().all()
 
-    if len(alerts) < 5:
-        return  # Wait until we have 5 alerts
+    if len(alerts) < 10:
+        return  # Wait until we have 10 alerts
 
     # Read images
     encoded_images = []
