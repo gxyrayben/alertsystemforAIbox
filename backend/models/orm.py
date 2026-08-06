@@ -15,6 +15,7 @@ class DeviceORM(Base):
     channels = Column(String, default="[]")
     device_tasks = Column(String, default="[]")
     available_algorithms = Column(String, default="[]")
+    agents = Column(String, default="[]")  # 设备侧智能体算法快照（JSON 字符串），随设备详情同步
 
 class AlertORM(Base):
     __tablename__ = "alerts"
@@ -52,3 +53,22 @@ class LogORM(Base):
     parameters = Column(String)
     result = Column(String)
     timestamp = Column(BigInteger, index=True)
+
+
+class ConversationORM(Base):
+    __tablename__ = "conversations"
+    id = Column(String, primary_key=True, index=True)
+    title = Column(String, default="新会话")
+    summary = Column(String, default="")  # 本会话滚动记忆/总结，长对话时压缩早期内容并回注为上下文
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, index=True, nullable=False)
+
+
+class MessageORM(Base):
+    __tablename__ = "messages"
+    id = Column(String, primary_key=True, index=True)
+    conversation_id = Column(String, index=True, nullable=False)
+    role = Column(String, nullable=False)  # user / model
+    text = Column(String, default="")
+    tables = Column(String, default="")  # 助手回复附带的表格数据（JSON 字符串），用于历史还原
+    created_at = Column(BigInteger, index=True, nullable=False)

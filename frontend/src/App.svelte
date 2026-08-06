@@ -1,5 +1,5 @@
 <script>
-    import Sidebar from './components/Sidebar.svelte';
+    import TopNav from './components/TopNav.svelte';
     import Devices from './components/Devices.svelte';
     import Tasks from './components/Tasks.svelte';
     import Alerts from './components/Alerts.svelte';
@@ -7,67 +7,99 @@
     import Services from './components/Services.svelte';
     import LLMConfig from './components/LLMConfig.svelte';
     import Logs from './components/Logs.svelte';
-    import Sessions from './components/Sessions.svelte';
+    import AIControl from './components/AIControl.svelte';
+    import TaskOps from './components/TaskOps.svelte';
+    import Feedback from './components/Feedback.svelte';
+    import AgentLibrary from './components/AgentLibrary.svelte';
+    import Toast from './components/Toast.svelte';
+    import { onMount } from 'svelte';
+    import { activeMenu, switchTab, loadDevices } from './lib/controlStore.js';
 
-    let activeMenu = localStorage.getItem('activeMenu') || 'network';
-    
-    $: if (activeMenu) {
-        localStorage.setItem('activeMenu', activeMenu);
-    }
+    onMount(() => {
+        loadDevices();
+    });
 
-    const menuTitles = {
-        'devices': '设备接入',
-        'tasks': '任务管理',
-        'alerts': '预警管理',
-        'services': '服务管理',
-        'network': '网络配置',
-        'llm': '模型配置',
-        'sessions': '会话管理',
-        'logs': '日志管理'
-    };
+    // 基础配置下的子功能项
+    const basicItems = [
+        { id: 'devices', fa: 'fa-server', label: '设备接入' },
+        { id: 'tasks', fa: 'fa-list-check', label: '任务管理' },
+        { id: 'alerts', fa: 'fa-bell', label: '预警管理' },
+        { id: 'logs', fa: 'fa-file-lines', label: '日志管理' },
+        { id: 'services', fa: 'fa-gears', label: '服务管理' },
+        { id: 'network', fa: 'fa-network-wired', label: '网络配置' },
+        { id: 'llm', fa: 'fa-microchip', label: '模型配置' }
+    ];
+    const basicIds = basicItems.map((i) => i.id);
+
+    $: isBasic = basicIds.includes($activeMenu);
 
     function handleMenuSelect(event) {
-        activeMenu = event.detail;
+        const id = event.detail;
+        // 点击“基础配置”默认进入第一个子项
+        switchTab(id === 'basic' ? basicItems[0].id : id);
     }
 </script>
 
-<div class="flex h-screen bg-gray-100 text-gray-800 font-sans">
-    <Sidebar {activeMenu} on:menuSelect={handleMenuSelect} />
+<div class="flex flex-col h-screen bg-bg text-ink font-sans">
+    <TopNav activeMenu={$activeMenu} on:menuSelect={handleMenuSelect} />
 
-    <main class="flex-1 flex flex-col overflow-hidden min-w-0">
-        <header class="h-16 bg-white border-b border-gray-200 flex items-center px-8 shadow-sm shrink-0">
-            <h2 class="text-xl font-semibold text-gray-800">
-                {menuTitles[activeMenu]}
-            </h2>
-        </header>
+    {#if isBasic}
+        <!-- 基础配置：左侧功能项 + 右侧内容 -->
+        <div class="flex-1 flex overflow-hidden min-w-0">
+            <aside class="w-56 shrink-0 bg-surface2 border-r border-edge p-3 overflow-y-auto">
+                <p class="px-3 py-2 text-xs font-semibold text-muted uppercase tracking-wider">基础配置</p>
+                <nav class="flex flex-col gap-1">
+                    {#each basicItems as item}
+                        <button
+                            on:click={() => switchTab(item.id)}
+                            class="flex items-center px-3 py-2.5 rounded-xl text-sm font-semibold transition-all text-left
+                            {$activeMenu === item.id
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30'
+                                : 'text-muted hover:bg-surface hover:text-ink'}"
+                        >
+                            <i class="fa-solid {item.fa} w-5 mr-2.5 text-center {$activeMenu === item.id ? 'text-white' : 'text-slate-400'}"></i>
+                            {item.label}
+                        </button>
+                    {/each}
+                </nav>
+            </aside>
 
-        <div class="flex-1 overflow-auto p-6">
-            {#if activeMenu === 'devices'}
-                <Devices />
-            {:else if activeMenu === 'tasks'}
-                <Tasks />
-            {:else if activeMenu === 'alerts'}
-                <Alerts />
-            {:else if activeMenu === 'network'}
-                <Network />
-            {:else if activeMenu === 'llm'}
-                <LLMConfig />
-            {:else if activeMenu === 'logs'}
-                <Logs />
-            {:else if activeMenu === 'services'}
-                <Services />
-            {:else if activeMenu === 'sessions'}
-                <Sessions />
-            {/if}
+            <main class="flex-1 overflow-auto p-6 min-w-0">
+                {#if $activeMenu === 'devices'}
+                    <Devices />
+                {:else if $activeMenu === 'tasks'}
+                    <Tasks />
+                {:else if $activeMenu === 'alerts'}
+                    <Alerts />
+                {:else if $activeMenu === 'logs'}
+                    <Logs />
+                {:else if $activeMenu === 'network'}
+                    <Network />
+                {:else if $activeMenu === 'llm'}
+                    <LLMConfig />
+                {:else if $activeMenu === 'services'}
+                    <Services />
+                {/if}
+            </main>
         </div>
-    </main>
+    {:else}
+        <main class="flex-1 overflow-auto p-6 min-w-0">
+            {#if $activeMenu === 'aicontrol'}
+                <AIControl />
+            {:else if $activeMenu === 'taskops'}
+                <TaskOps />
+            {:else if $activeMenu === 'feedback'}
+                <Feedback />
+            {:else if $activeMenu === 'library'}
+                <AgentLibrary />
+            {/if}
+        </main>
+    {/if}
 </div>
 
+<Toast />
+
 <style>
-    :global(body) {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    }
-    
     :global(.animate-spin) {
         animation: spin 2s linear infinite;
     }

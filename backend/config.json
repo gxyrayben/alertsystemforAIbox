@@ -3,20 +3,26 @@
         "ws": {
             "enabled": true,
             "port": "8082",
-            "path": "/api/ws/alarms"
+            "path": "/api/ws/alarms",
+            "auth_enabled": false,
+            "username": "",
+            "password": ""
         },
         "http": {
             "enabled": true,
             "port": "8081",
-            "path": "/api/http/alarms"
+            "path": "/api/http/alarms",
+            "auth_enabled": false,
+            "username": "",
+            "password": ""
         }
     },
     "backend_interface_id": "en0",
     "frontend_interface_id": "en0",
     "llm_config": {
         "provider": "Kimi (Moonshot)",
-        "model_name": "kimi-k2.5",
+        "model_name": "kimi-k2.6",
         "base_url": "https://api.moonshot.cn/v1",
-        "api_key": "sk-JhE0CjN6GGofhLcHm6AiUguyIJTLttphLEvit5wWtUyERba3"
+        "api_key": "sk-TbOo22JhMz6cLZHOo5aLYDbEemVCB7AFnm8qFQC0DCpJ1zvo"
     }
 }

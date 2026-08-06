@@ -14,6 +14,15 @@ class Device(BaseModel):
     channels: Optional[str] = "[]"
     device_tasks: Optional[str] = "[]"
     available_algorithms: Optional[str] = "[]"
+    agents: Optional[str] = "[]"
+
+class AgentCreate(BaseModel):
+    """在设备上新建智能体算法的请求体。alarm_type：freeform=描述型，yesno=判断型。"""
+    event_id: str
+    event_tag: str
+    prompt: str
+    alarm_type: str = "freeform"
+    alarm_condition: Optional[str] = None
 
 class Alert(BaseModel):
     id: Optional[str] = None
@@ -26,6 +35,8 @@ class Alert(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[dict]
+    conversation_id: Optional[str] = None
+    device_id: Optional[str] = None
 
 class AIAnalyzeRequest(BaseModel):
     alert_id: str
@@ -107,3 +118,29 @@ class LogResponse(LogBase):
 class LogListResponse(BaseModel):
     items: List[LogResponse]
     total: int
+
+
+class MessageResponse(BaseModel):
+    id: str
+    role: str
+    text: str
+    tables: List[dict] = []
+    created_at: int
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationResponse(BaseModel):
+    id: str
+    title: str
+    summary: str = ""
+    created_at: int
+    updated_at: int
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationDetail(ConversationResponse):
+    messages: List[MessageResponse] = []

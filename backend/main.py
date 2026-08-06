@@ -9,7 +9,7 @@ from sqlalchemy.future import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from routers import devices, alerts, network, services, chat, llm, tasks, logs
+from routers import devices, alerts, network, services, chat, llm, tasks, logs, conversations
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
 from services import alarm_services
@@ -46,6 +46,18 @@ async def clean_old_alerts():
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 兼容旧库：messages 表补充 tables 列（存储助手回复的表格数据用于历史还原）
+        cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(messages)"))).fetchall()]
+        if "tables" not in cols:
+            await conn.execute(text("ALTER TABLE messages ADD COLUMN tables TEXT DEFAULT ''"))
+        # 兼容旧库：conversations 表补充 summary 列（本会话滚动记忆/总结）
+        conv_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(conversations)"))).fetchall()]
+        if "summary" not in conv_cols:
+            await conn.execute(text("ALTER TABLE conversations ADD COLUMN summary TEXT DEFAULT ''"))
+        # 兼容旧库：devices 表补充 agents 列（设备侧智能体算法快照）
+        dev_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(devices)"))).fetchall()]
+        if "agents" not in dev_cols:
+            await conn.execute(text("ALTER TABLE devices ADD COLUMN agents TEXT DEFAULT '[]'"))
         await conn.execute(text("PRAGMA journal_mode=WAL;"))
         await conn.execute(text("PRAGMA synchronous=NORMAL;"))
         await conn.execute(text("PRAGMA cache_size=-64000;"))
@@ -86,6 +98,7 @@ app.include_router(chat.router)
 app.include_router(llm.router)
 app.include_router(tasks.router)
 app.include_router(logs.router)
+app.include_router(conversations.router)
 
 if __name__ == "__main__":
     import uvicorn
