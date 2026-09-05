@@ -23,7 +23,6 @@
     const basicItems = [
         { id: 'devices', fa: 'fa-server', label: '设备接入' },
         { id: 'tasks', fa: 'fa-list-check', label: '任务管理' },
-        { id: 'alerts', fa: 'fa-bell', label: '预警管理' },
         { id: 'logs', fa: 'fa-file-lines', label: '日志管理' },
         { id: 'services', fa: 'fa-gears', label: '服务管理' },
         { id: 'network', fa: 'fa-network-wired', label: '网络配置' },
@@ -69,8 +68,6 @@
                     <Devices />
                 {:else if $activeMenu === 'tasks'}
                     <Tasks />
-                {:else if $activeMenu === 'alerts'}
-                    <Alerts />
                 {:else if $activeMenu === 'logs'}
                     <Logs />
                 {:else if $activeMenu === 'network'}
@@ -90,6 +87,8 @@
                 <TaskOps />
             {:else if $activeMenu === 'feedback'}
                 <Feedback />
+            {:else if $activeMenu === 'alerts'}
+                <Alerts />
             {:else if $activeMenu === 'library'}
                 <AgentLibrary />
             {/if}

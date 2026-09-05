@@ -30,6 +30,57 @@ def _default_alarm_condition(alarm_type: Optional[str]) -> str:
     return "only_yes" if (alarm_type or "").lower() == "yesno" else "none"
 
 
+def build_agent_config(agent: dict, area: Optional[dict] = None) -> dict:
+    """由一个「已富化 agent 项」构造 agent_real_task 中单个 agent_list[i].agent_config。
+
+    agent 可含：alarm_type / prompt / alarm_condition / filter_enable / filter_keywords。
+    - alarm_condition 缺省按 alarm_type 推导；
+    - filter_enable 关闭时强制清空 filter_keywords（避免下发无意义的过滤词）；
+    - areas 恒为单 ROI（缺省全画面），符合「每个智能体只关联一个检测区」。
+    """
+    area = area or full_frame_area()
+    filter_enable = bool(agent.get("filter_enable", False))
+    return {
+        "schedule_plan_id": "1",
+        "alarm_condition": agent.get("alarm_condition") or _default_alarm_condition(agent.get("alarm_type")),
+        "prompt": agent.get("prompt", "") or "",
+        "filter_enable": filter_enable,
+        "filter_keywords": (agent.get("filter_keywords") or "") if filter_enable else "",
+        "areas": [area],
+    }
+
+
+def build_agent_real_task_payload(
+    task_name: str,
+    channel_device_id: int,
+    agents: List[dict],
+    analysis_interval: int = 5,
+) -> dict:
+    """纯大模型智能体任务（agent_real_task），单步下发；支持关联多个智能体（≤4）。
+
+    agents 为已富化的智能体项列表，每项需含 event_id / event_tag，其余字段（prompt /
+    alarm_condition / alarm_type / filter_enable / filter_keywords / area）交给 build_agent_config 兜底。
+    analysis_interval 为【任务级】全局分析间隔（秒）。
+    """
+    agent_list = [
+        {
+            "event_id": a.get("event_id"),
+            "event_tag": a.get("event_tag"),
+            "agent_config": build_agent_config(a, a.get("area")),
+        }
+        for a in agents
+    ]
+    return {
+        "task_name": task_name,
+        "task_type": "agent_real_task",
+        "device_list": [{"device_id": channel_device_id}],
+        "enable": True,
+        "schedule_plan_id": "1",
+        "analysis_interval": analysis_interval,
+        "agent_list": agent_list,
+    }
+
+
 def build_agent_task_payload(
     task_name: str,
     channel_device_id: int,
@@ -39,34 +90,23 @@ def build_agent_task_payload(
     analysis_interval: int = 5,
     area: Optional[dict] = None,
 ) -> dict:
-    """纯大模型智能体任务（agent_real_task），单步下发。
+    """纯大模型智能体任务（单智能体便捷入口，供 agent_tools.create_agent_task 复用）。
 
     agent 为设备 agent_list 中命中的一项，需含 event_id / event_tag / alarm_type / prompt。
-    prompt / alarm_condition 缺省时沿用智能体自身配置。
+    prompt / alarm_condition 缺省时沿用智能体自身配置；内部委托到 build_agent_real_task_payload，
+    行为与旧版一致（filter_enable=False / filter_keywords=""）。
     """
-    area = area or full_frame_area()
-    return {
-        "task_name": task_name,
-        "task_type": "agent_real_task",
-        "device_list": [{"device_id": channel_device_id}],
-        "enable": True,
-        "schedule_plan_id": "1",
-        "analysis_interval": analysis_interval,
-        "agent_list": [
-            {
-                "event_id": agent.get("event_id"),
-                "event_tag": agent.get("event_tag"),
-                "agent_config": {
-                    "schedule_plan_id": "1",
-                    "alarm_condition": alarm_condition or _default_alarm_condition(agent.get("alarm_type")),
-                    "prompt": prompt if prompt is not None else agent.get("prompt", ""),
-                    "filter_enable": False,
-                    "filter_keywords": "",
-                    "areas": [area],
-                },
-            }
-        ],
+    enriched = {
+        "event_id": agent.get("event_id"),
+        "event_tag": agent.get("event_tag"),
+        "alarm_type": agent.get("alarm_type"),
+        "prompt": prompt if prompt is not None else agent.get("prompt", ""),
+        "alarm_condition": alarm_condition or _default_alarm_condition(agent.get("alarm_type")),
+        "filter_enable": False,
+        "filter_keywords": "",
+        "area": area or full_frame_area(),
     }
+    return build_agent_real_task_payload(task_name, channel_device_id, [enriched], analysis_interval)
 
 
 def build_single_point_task_payload(
@@ -187,6 +227,60 @@ def _target_type_to_yolo(target_types: Optional[List[str]]) -> str:
     return "any"
 
 
+def _is_full_frame(points: Optional[List[dict]]) -> bool:
+    """近似判定一组归一化点是否为全画面矩形（四角 0/1，容差 0.02）。"""
+    pts = points or []
+    if len(pts) != 4:
+        return False
+    corners = {(round(p.get("x", -9)), round(p.get("y", -9))) for p in pts}
+    return corners == {(0, 0), (1, 0), (1, 1), (0, 1)} and all(
+        abs(p.get("x", 0) - round(p.get("x", 0))) < 0.02 and abs(p.get("y", 0) - round(p.get("y", 0))) < 0.02
+        for p in pts
+    )
+
+
+def _task_mode(task: dict, mon: Optional[dict]) -> str:
+    """任务类型 → 面板分支标识：agent（纯大模型）/ combined（小+大）/ smallmodel（纯小模型）。"""
+    if (task or {}).get("task_type") == "agent_real_task":
+        return "agent"
+    rule = _first_rule(mon)
+    ep = (rule or {}).get("extendParams") or {}
+    if (ep.get("aiotapCustom") or {}).get("agentLLMParam"):
+        return "combined"
+    return "smallmodel"
+
+
+def _agent_task_panel(task: dict) -> dict:
+    """纯大模型任务(agent_real_task) → 面板 config 的 agents[] / rois[] / activeAgentIndex 还原。
+
+    每个 agent 的检测区在其 agent_config.areas[0]；全画面归一化到共享的 'full' 项，
+    其余各自生成 '检测区N' 并让该 agent 的 roiId 指向它（每 agent 单 ROI）。
+    注意：task_list 无 alarm_type，故 agents[].alarm_type 缺省，属性型开关在查看模式 best-effort。
+    """
+    rois = [{"id": "full", "name": "全屏检测", "points": []}]
+    agents = []
+    for i, item in enumerate((task or {}).get("agent_list") or []):
+        item = item or {}
+        cfg = item.get("agent_config") or {}
+        areas = cfg.get("areas") or []
+        points = (areas[0].get("points") if areas and isinstance(areas[0], dict) else None) or []
+        if points and not _is_full_frame(points):
+            roi_id = f"roi_{i}"
+            rois.append({"id": roi_id, "name": f"检测区{len(rois)}", "points": points})
+        else:
+            roi_id = "full"
+        agents.append({
+            "event_id": item.get("event_id"),
+            "event_tag": item.get("event_tag"),
+            "prompt": cfg.get("prompt", ""),
+            "alarm_condition": cfg.get("alarm_condition"),
+            "filter_enable": bool(cfg.get("filter_enable", False)),
+            "filter_keywords": cfg.get("filter_keywords", "") or "",
+            "roiId": roi_id,
+        })
+    return {"agents": agents, "rois": rois, "activeAgentIndex": 0}
+
+
 def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
     """build_monitor_payload 的逆映射：把设备任务 + monitor 还原为右侧控制面板可直接回填的 config。
 
@@ -197,21 +291,22 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
     与前端 defaultConfig 未覆盖的键由前端 `{...defaultConfig, ...detail}` 兜底，故此处只输出确有依据的键。
     """
     cfg: dict = {}
+    cfg["taskMode"] = _task_mode(task, mon)
     if task:
         if task.get("task_name"):
             cfg["name"] = task.get("task_name")
         if task.get("analysis_interval") is not None:
             cfg["interval"] = task.get("analysis_interval")
 
-    # 纯大模型任务：无 monitor，从 agent_list 还原 Agent 面板
-    agent_list = (task or {}).get("agent_list") or []
-    if agent_list:
-        first_agent = agent_list[0] or {}
-        agent_cfg = first_agent.get("agent_config") or {}
-        if first_agent.get("event_tag"):
-            cfg["agentType"] = first_agent.get("event_tag")
-        if agent_cfg.get("prompt"):
-            cfg["prompt"] = agent_cfg.get("prompt")
+    # 纯大模型任务：无 monitor，从 agent_list 还原多智能体 + 每智能体 ROI 绑定
+    if cfg["taskMode"] == "agent":
+        cfg.update(_agent_task_panel(task))
+        agent_list = (task or {}).get("agent_list") or []
+        if agent_list:
+            first_agent = agent_list[0] or {}
+            if first_agent.get("event_tag"):
+                cfg["agentType"] = first_agent.get("event_tag")
+        return cfg
 
     rule = _first_rule(mon)
     if not rule:

@@ -9,7 +9,7 @@ from sqlalchemy.future import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from routers import devices, alerts, network, services, chat, llm, tasks, logs, conversations
+from routers import devices, alerts, network, services, chat, llm, tasks, logs, conversations, feedback
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
 from services import alarm_services
@@ -58,6 +58,23 @@ async def lifespan(app: FastAPI):
         dev_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(devices)"))).fetchall()]
         if "agents" not in dev_cols:
             await conn.execute(text("ALTER TABLE devices ADD COLUMN agents TEXT DEFAULT '[]'"))
+        # 兼容旧库：alerts 表补充告警反馈闭环所需列
+        alert_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(alerts)"))).fetchall()]
+        _alert_migrations = {
+            "imageUrlCrop": "ALTER TABLE alerts ADD COLUMN imageUrlCrop TEXT",
+            "channel": "ALTER TABLE alerts ADD COLUMN channel TEXT DEFAULT ''",
+            "feedback_status": "ALTER TABLE alerts ADD COLUMN feedback_status TEXT DEFAULT ''",
+            "feedback_note": "ALTER TABLE alerts ADD COLUMN feedback_note TEXT DEFAULT ''",
+            "feedback_time": "ALTER TABLE alerts ADD COLUMN feedback_time BIGINT",
+            "feedback_submitted": "ALTER TABLE alerts ADD COLUMN feedback_submitted BIGINT DEFAULT 0",
+        }
+        for col, ddl in _alert_migrations.items():
+            if col not in alert_cols:
+                await conn.execute(text(ddl))
+        # 兼容旧库：logs 表补充 task_name 列（关联下发任务名）
+        log_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(logs)"))).fetchall()]
+        if "task_name" not in log_cols:
+            await conn.execute(text("ALTER TABLE logs ADD COLUMN task_name TEXT DEFAULT ''"))
         await conn.execute(text("PRAGMA journal_mode=WAL;"))
         await conn.execute(text("PRAGMA synchronous=NORMAL;"))
         await conn.execute(text("PRAGMA cache_size=-64000;"))
@@ -99,6 +116,7 @@ app.include_router(llm.router)
 app.include_router(tasks.router)
 app.include_router(logs.router)
 app.include_router(conversations.router)
+app.include_router(feedback.router)
 
 if __name__ == "__main__":
     import uvicorn

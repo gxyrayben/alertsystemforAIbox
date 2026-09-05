@@ -17,7 +17,7 @@
             "password": ""
         }
     },
-    "backend_interface_id": "en0",
+    "backend_interface_id": "WLAN",
     "frontend_interface_id": "en0",
     "llm_config": {
         "provider": "Kimi (Moonshot)",

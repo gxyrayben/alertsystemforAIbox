@@ -35,18 +35,24 @@ async def receive_http_alarm(request: Request, db: AsyncSession = Depends(get_db
     if not matched_device:
         raise HTTPException(status_code=403, detail=f"Forbidden: Device ID '{device_id}' is not registered in this system")
 
-    image_url = alarm_ingest.save_alarm_images(images)
+    image_urls = alarm_ingest.save_alarm_images_all(images)
+    image_url = image_urls[0] if image_urls else None
+    image_url_crop = image_urls[1] if len(image_urls) > 1 else None
     alarm_time, timestamp_val = alarm_ingest.parse_alarm_time(fields["pts"])
 
     new_id = f"alert-{uuid.uuid4()}"
     new_alert = AlertORM(
         id=new_id,
-        deviceName=matched_device.name or f"设备 {device_id}",  # 优先使用系统录入的名称
-        alertType=fields["agent_alias"] or fields["alarm_minor"] or "未知类型",
+        deviceName=matched_device.name or device_id,  # 优先使用系统录入的名称
+        alertType=fields["alarm_minor"] or fields["agent_evid"] or "unknown",
         time=alarm_time,
         timestamp=timestamp_val,
         imageUrl=image_url,
-        remark=f"版本: {fields['version']}, 规则: {fields['agent_name']} ({fields['content']})",
+        imageUrlCrop=image_url_crop,
+        channelid=fields["channel_id"], 
+        channelname=fields["channel_name"],  # 触发通道名（= 设备通道快照里的 device_name），供预警管理按通道检索
+        remark=fields["reslut"],
+        ### //remark=f"版本: {fields['version']}, 规则: {fields['agent_name']} ({fields['content']})",
     )
     db.add(new_alert)
     await db.commit()
@@ -56,6 +62,8 @@ async def receive_http_alarm(request: Request, db: AsyncSession = Depends(get_db
 @router.get("/alerts", response_model=List[Alert])
 async def get_alerts(
     deviceName: Optional[str] = None,
+    channelid: Optional[str] = None,
+    channelname: Optional[str] = None,
     alertType: Optional[str] = None,
     startDate: Optional[str] = None,
     endDate: Optional[str] = None,
@@ -63,7 +71,11 @@ async def get_alerts(
 ):
     query = select(AlertORM)
     if deviceName:
-        query = query.where(AlertORM.deviceName.like(f"%{deviceName}%"))
+        query = query.where(AlertORM.deviceName == deviceName)
+    if channelid:
+            query = query.where(AlertORM.channelid == channelid)
+    if channelname:
+        query = query.where(AlertORM.channelname == channelname)
     if alertType:
         query = query.where(AlertORM.alertType == alertType)
     if startDate:

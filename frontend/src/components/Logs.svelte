@@ -47,13 +47,14 @@
     function exportToCsv() {
         if (logs.length === 0) return;
 
-        const headers = ['日志ID', '操作设备', '调用接口', '核心参数', '调用时间', '调用结果'];
+        const headers = ['日志ID', '操作设备', '关联任务', '调用接口', '核心参数', '调用时间', '调用结果'];
         const csvRows = [headers.join(',')];
 
         logs.forEach(log => {
             const row = [
                 log.log_id,
                 log.device_name,
+                `"${(log.task_name || '').replace(/"/g, '""')}"`,
                 log.api_path,
                 // Escape quotes for CSV
                 `"${log.parameters.replace(/"/g, '""')}"`,
@@ -91,17 +92,19 @@
         <div class="flex-1 overflow-y-auto">
             <table class="w-full table-fixed divide-y divide-slate-800">
                 <colgroup>
-                    <col class="w-[9%]" />
-                    <col class="w-[12%]" />
-                    <col class="w-[20%]" />
-                    <col class="w-[27%]" />
-                    <col class="w-[16%]" />
-                    <col class="w-[16%]" />
+                    <col class="w-[8%]" />
+                    <col class="w-[11%]" />
+                    <col class="w-[13%]" />
+                    <col class="w-[18%]" />
+                    <col class="w-[21%]" />
+                    <col class="w-[14%]" />
+                    <col class="w-[15%]" />
                 </colgroup>
                 <thead class="bg-slate-900/60 sticky top-0 z-10 shadow-sm">
                     <tr>
                         <th class="px-4 py-3.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider">日志ID</th>
                         <th class="px-4 py-3.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider">操作设备</th>
+                        <th class="px-4 py-3.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider">关联任务</th>
                         <th class="px-4 py-3.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider">调用接口</th>
                         <th class="px-4 py-3.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider">核心参数</th>
                         <th class="px-4 py-3.5 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider">调用时间</th>
@@ -110,14 +113,15 @@
                 </thead>
                 <tbody class="bg-slate-950 divide-y divide-slate-800">
                     {#if isLoading}
-                        <tr><td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">加载中...</td></tr>
+                        <tr><td colspan="7" class="px-4 py-8 text-center text-sm text-slate-500">加载中...</td></tr>
                     {:else if logs.length === 0}
-                        <tr><td colspan="6" class="px-4 py-12 text-center text-sm text-slate-500">暂无日志数据</td></tr>
+                        <tr><td colspan="7" class="px-4 py-12 text-center text-sm text-slate-500">暂无日志数据</td></tr>
                     {:else}
                         {#each logs as log}
                             <tr class="hover:bg-slate-900/60 transition-colors align-top">
                                 <td class="px-4 py-3.5 text-sm text-slate-400 font-mono truncate" title={log.log_id}>{log.log_id}</td>
                                 <td class="px-4 py-3.5 text-sm font-medium text-slate-100 truncate" title={log.device_name}>{log.device_name}</td>
+                                <td class="px-4 py-3.5 text-sm text-slate-300 truncate" title={log.task_name}>{log.task_name || '—'}</td>
                                 <td class="px-4 py-3.5 text-sm" title={log.api_path}>
                                     <span class="inline-block max-w-full truncate align-bottom text-indigo-400 font-mono text-xs bg-indigo-500/10 rounded px-1.5 py-0.5">{log.api_path}</span>
                                 </td>

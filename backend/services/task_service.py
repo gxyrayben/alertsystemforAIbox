@@ -75,8 +75,8 @@ def _locate_device_agent(tasks_data: dict, task_obj: TaskORM, target_agent_id: s
 
 
 async def _apply_prompt_optimization(client, device, db, target_device_task,
-                                     target_agent, optimized_prompt) -> None:
-    """把优化后的 Prompt 下发到设备并记录操作日志。"""
+                                     target_agent, optimized_prompt, task_name: str = "") -> str:
+    """把优化后的 Prompt 下发到设备并记录操作日志，返回该日志的 log_id。"""
     target_agent["agent_config"]["prompt"] = optimized_prompt
     update_payload = DeviceService.build_task_payload(target_device_task)
 
@@ -84,12 +84,13 @@ async def _apply_prompt_optimization(client, device, db, target_device_task,
     put_res = await client.put(f"{base_url}/intelli_manager/task", json=update_payload)
 
     ok = put_res.status_code == 200 and put_res.json().get("code") == 0
-    await add_operation_log(
+    return await add_operation_log(
         db=db,
         device_name=device.name,
         api_path="PUT /intelli_manager/task (Prompt Optimization)",
         parameters=optimized_prompt,
         result="成功" if ok else f"失败: {put_res.text}",
+        task_name=task_name or target_device_task.get("task_name", ""),
     )
 
 

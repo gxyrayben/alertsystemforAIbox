@@ -751,6 +751,27 @@ async def _propose_deployment(args: dict, db: AsyncSession) -> str:
         "device_id": device.device_id,
         "device_name": device.name,
     }
+
+    # 纯大模型任务：补齐面板所需的多智能体 / ROI 结构 + 可选智能体下拉（离线用快照）
+    if task_type == "agent":
+        available = _load_json(device.agents)
+        proposal.update({
+            "taskMode": "agent",
+            "interval": 5,
+            "agents": [{
+                "event_id": (agent or {}).get("event_id") or args.get("agent_id"),
+                "event_tag": (agent or {}).get("event_tag") or str(args.get("agent_id")),
+                "alarm_type": (agent or {}).get("alarm_type") or "freeform",
+                "prompt": (agent or {}).get("prompt", ""),
+                "alarm_condition": tb._default_alarm_condition((agent or {}).get("alarm_type")),
+                "filter_enable": False,
+                "filter_keywords": "",
+                "roiId": "full",
+            }],
+            "rois": [{"id": "full", "name": "全屏检测", "points": []}],
+            "activeAgentIndex": 0,
+            "available_agents": available,
+        })
     return _ok({"success": True, "proposal": proposal,
                 "message": f"已为设备「{device.name}」生成布控方案预览，请在右侧界面确认参数并绘制检测区(ROI)。"})
 

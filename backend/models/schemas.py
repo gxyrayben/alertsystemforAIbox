@@ -14,6 +14,7 @@ class Device(BaseModel):
     channels: Optional[str] = "[]"
     device_tasks: Optional[str] = "[]"
     available_algorithms: Optional[str] = "[]"
+    algorithms_ability: Optional[str] = "[]"
     agents: Optional[str] = "[]"
 
 class AgentCreate(BaseModel):
@@ -24,6 +25,28 @@ class AgentCreate(BaseModel):
     alarm_type: str = "freeform"
     alarm_condition: Optional[str] = None
 
+class AgentTaskItem(BaseModel):
+    """智能体任务(agent_real_task)中关联的单个智能体及其检测区/过滤配置。
+
+    roiPoints：归一化多边形点 [{x,y}]；为空表示全画面检测。
+    filter_enable/filter_keywords：仅描述型(freeform)智能体有意义，其余下发时强制关闭。
+    """
+    event_id: str
+    event_tag: str = ""
+    alarm_type: str = "freeform"
+    prompt: str = ""
+    alarm_condition: Optional[str] = None
+    filter_enable: bool = False
+    filter_keywords: str = ""
+    roiPoints: List[dict] = []
+
+class AgentTaskDeploy(BaseModel):
+    """纯大模型智能体任务下发请求体（最多关联 4 个智能体）。"""
+    channel_device_id: int
+    task_name: str
+    analysis_interval: int = 5
+    agents: List[AgentTaskItem]
+
 class Alert(BaseModel):
     id: Optional[str] = None
     deviceName: str
@@ -31,7 +54,55 @@ class Alert(BaseModel):
     time: str
     timestamp: int
     imageUrl: Optional[str] = None
+    imageUrlCrop: Optional[str] = None
+    channel: Optional[str] = ""
     remark: Optional[str] = "暂无备注"
+    feedback_status: Optional[str] = ""
+    feedback_note: Optional[str] = ""
+    feedback_time: Optional[int] = None
+    feedback_submitted: Optional[int] = 0
+
+    class Config:
+        from_attributes = True
+
+class FeedbackRequest(BaseModel):
+    """告警标注请求。status: 'valid' 真实告警 / 'false_positive' 误报。"""
+    status: str
+    note: Optional[str] = ""
+
+class OptimizationSubmit(BaseModel):
+    """提交已标注误报做后端优化。为空则提交全部未提交的已标注误报。"""
+    alert_ids: Optional[List[str]] = None
+
+
+class FeedbackTaskResponse(BaseModel):
+    """调优下发运维记录（列表用，不含告警快照明细）。"""
+    id: str
+    batch_id: str
+    device_name: str
+    task_name: str = ""
+    channel: str = ""
+    category: str = ""
+    case_key: str = ""
+    action: str
+    result: str = ""
+    detail: str = ""
+    alert_count: int = 0
+    log_id: str = ""
+    created_at: int
+
+    class Config:
+        from_attributes = True
+
+
+class FeedbackTaskListResponse(BaseModel):
+    items: List[FeedbackTaskResponse]
+    total: int
+
+
+class FeedbackTaskDetail(FeedbackTaskResponse):
+    """记录详情：附带该次标注告警快照，供前端翻页查看。"""
+    alerts: List[dict] = []
 
 class ChatRequest(BaseModel):
     messages: List[dict]
@@ -105,6 +176,7 @@ class LogBase(BaseModel):
     parameters: str
     result: str
     timestamp: int
+    task_name: Optional[str] = ""
 
 class LogCreate(LogBase):
     pass

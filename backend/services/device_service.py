@@ -12,7 +12,7 @@ MONITOR_LIST_PATH = "/intelli_manager/monitor_list"
 MONITOR_LIST_BODY = {"offset": 0, "size": 100}
 
 
-def apply_device_snapshot(device_obj: DeviceORM, channels, device_tasks, algorithms, status, session_id, agents=None) -> None:
+def apply_device_snapshot(device_obj: DeviceORM, channels, device_tasks, algorithms, status, session_id, algorithms_ability, agents=None ) -> None:
     """把 fetch_device_data 的结果写回设备 ORM（channels/tasks/algorithms/agents 转 JSON 字符串）。
     消除 devices 路由中 create/fetch/update 三处重复的赋值块。"""
     device_obj.status = status
@@ -20,6 +20,7 @@ def apply_device_snapshot(device_obj: DeviceORM, channels, device_tasks, algorit
     device_obj.channels = json.dumps(channels)
     device_obj.device_tasks = json.dumps(device_tasks)
     device_obj.available_algorithms = json.dumps(algorithms)
+    device_obj.algorithms_ability = json.dumps(algorithms_ability)
     device_obj.agents = json.dumps(agents or [], ensure_ascii=False)
 
 
@@ -75,9 +76,31 @@ def _parse_channels(items: list) -> List[dict]:
             "device_name": item.get("device_name"),
             "proto": item.get("proto"),
             "rtsp": item.get("rtsp_param", {}).get("url"),
+            "gbid": item.get("gb28181_param", {}).get("DeviceID"),
         }
         for item in items
     ]
+
+def _parse_algorithms(items: list) -> List[dict]:
+    results = []
+    for item in items:
+        pockets = item.get("pocket") or item.get("pockets", [])
+        for pocket in pockets:
+            name = pocket.get("name", "")
+            # 提取 cards 中每个对象的 type
+            cards = [
+                card.get("type") 
+                for card in pocket.get("cards", []) 
+                if "type" in card
+            ]
+            
+            results.append({
+                "name": name,
+                "cards": cards
+            })
+
+        
+    return results
 
 
 def _parse_agents(items: list) -> List[dict]:
@@ -85,8 +108,10 @@ def _parse_agents(items: list) -> List[dict]:
     return [
         {
             "agent_id": item.get("agent_id"),
+            "agent_name": item.get("agent_name"),
             "event_id": item.get("event_id"),
             "event_tag": item.get("event_tag"),
+            "alarm_condition": item.get("alarm_condition"),
             "alarm_type": item.get("alarm_type"),
             "prompt": item.get("prompt", ""),
         }
@@ -106,11 +131,11 @@ def categorize_task(task: dict) -> str:
     task_type = (task.get("task_type") or "").strip()
     agent_list = task.get("agent_list") or []
     if task_type == "agent_real_task":
-        return "大模型任务"
+        return "agent_task"
     if task_type == "single_point_task":
         # single_point_task 挂载了智能体（monitor 的 agentLLMParam 会体现在 agent_list）→ 小+大
-        return "小+大任务" if agent_list else "小模型任务"
-    return "其它任务"
+        return "small_and_agent_task" if agent_list else "small_task"
+    return "unknown_task"
 
 
 def _task_status(task: dict) -> str:
@@ -156,9 +181,8 @@ def _summarize_tasks(task_list: list, monitor_by_task: Optional[dict] = None) ->
     algorithms = set()
     for task in task_list:
         agent_list = task.get("agent_list", []) or []
-        agent_ids = [a.get("event_id", "") for a in agent_list if a.get("event_id")]
-        agent_tags = [(a.get("event_tag") or a.get("event_id")) for a in agent_list
-                      if (a.get("event_tag") or a.get("event_id"))]
+        agent_ids = [a.get("agent_id", "") for a in agent_list if a.get("agent_id")]
+        agent_tags = [a.get("agent_name", "") for a in agent_list  if a.get("agent_name")]
         algorithms.update(agent_ids)
         device_names = [d.get("device_name") for d in task.get("device_list", []) if d.get("device_name")]
 
@@ -169,9 +193,9 @@ def _summarize_tasks(task_list: list, monitor_by_task: Optional[dict] = None) ->
         agent_join = ", ".join(agent_tags)
 
         # 『关联智能体/算法』列：大模型→智能体名(不变)；小模型→小模型算法中文名；小+大→『小模型/智能体』
-        if category == "小模型任务":
+        if category == "small_task":
             assoc = algo_name
-        elif category == "小+大任务":
+        elif category == "small_and_agent_task":
             assoc = f"{algo_name}/{agent_join}" if algo_name else agent_join
         else:
             assoc = agent_join
@@ -310,6 +334,7 @@ class DeviceService:
         channels: List[dict] = []
         device_tasks: List[dict] = []
         algorithms: set = set()
+        algorithms_ability: List[dict] = []
         agents: List[dict] = []
         status = "离线"
         session_id = existing_session_id
@@ -340,13 +365,15 @@ class DeviceService:
 
                 if status == "在线":
                     channels = await DeviceService._fetch_channels(client, base_url, ip)
-                    device_tasks, algorithms = await DeviceService._fetch_task_summaries(client, base_url, ip)
+                    algorithms_ability = await DeviceService._fetch_algorithms_ability(client, base_url, ip)
                     agents = await DeviceService._fetch_agents(client, base_url, ip)
+                    device_tasks, algorithms = await DeviceService._fetch_task_summaries(client, base_url, ip)
+                    
         except Exception as global_e:
             print(f"Global error in fetch_device_data for {ip}: {global_e}")
             status = "离线"
 
-        return channels, device_tasks, list(algorithms), status, session_id, agents
+        return channels, device_tasks, list(algorithms), status, session_id, algorithms_ability, agents 
 
     @staticmethod
     async def _fetch_channels(client: httpx.AsyncClient, base_url: str, ip: str) -> List[dict]:
@@ -370,6 +397,17 @@ class DeviceService:
             print(f"Error fetching tasks from {ip}: {e}")
         return [], set()
 
+    @staticmethod
+    async def _fetch_algorithms_ability(client: httpx.AsyncClient, base_url: str, ip: str) ->  List[dict]:
+        try:
+            res = await client.post(f"{base_url}/intelli_manager/alg_warehouse/packet_list", json=TASK_LIST_BODY)
+            if res.status_code == 200 and res.json().get("code") == 0:
+                objectalgorithms = res.json().get("data", {})
+                return _parse_algorithms(objectalgorithms.get("list", []))
+        except Exception as e:
+            print(f"Error fetching tasks from {ip}: {e}")
+        return []
+    
     @staticmethod
     async def _fetch_monitor_index(client: httpx.AsyncClient, base_url: str, ip: str) -> dict:
         """拉取 monitor 列表并按 task_id 建索引；失败/接口不存在时返回空 dict（优雅降级）。

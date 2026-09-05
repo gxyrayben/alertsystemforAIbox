@@ -18,13 +18,14 @@
     }
 
     // 归属于“基础配置”的子功能项
-    const basicIds = ['devices', 'tasks', 'alerts', 'logs', 'services', 'network', 'llm'];
+    const basicIds = ['devices', 'tasks', 'logs', 'services', 'network', 'llm'];
 
     // fa = FontAwesome 图标类；badge = 右上角红色计数（可选）
     const menuItems = [
         { id: 'aicontrol', fa: 'fa-comments', label: 'AI 双模态布控' },
         { id: 'taskops', fa: 'fa-table-list', label: '任务运维列表' },
         { id: 'feedback', fa: 'fa-circle-exclamation', label: '告警反馈闭环', badge: 1 },
+        { id: 'alerts', fa: 'fa-bell', label: '预警管理' },
         { id: 'library', fa: 'fa-diagram-project', label: '智能体资产库' },
         { id: 'basic', fa: 'fa-gear', label: '基础配置' }
     ];

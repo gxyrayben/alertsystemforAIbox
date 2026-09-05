@@ -101,7 +101,8 @@ async def run_simulation():
             "password": "password",
             "channels": '[{"device_name": "channel_1"}]',
             "device_tasks": '[{"task_name": "测试区域抓拍", "device_name": "channel_1", "agent_id": "人脸抓拍"}]',
-            "available_algorithms": '["人脸抓拍"]'
+            "available_algorithms": '["人脸抓拍"]',
+            "algorithms_ability": '["人脸抓拍"]'
         }
         res = await client.post(f"{BACKEND_URL}/devices", json=device_payload)
         print(f"2. 注册仿真设备: {res.status_code}")

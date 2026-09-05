@@ -1,6 +1,103 @@
 <script>
-    import { onMount } from 'svelte';
+    import { createEventDispatcher } from 'svelte';
     import { API_BASE, apiGet, apiPost } from '../lib/api.js';
+    import { selectedDevice } from '../lib/controlStore.js';
+
+    // 1. 定义原始映射元组配置 ///////////////////////////////////////////////////////////////////////////////////////////////////////
+    const _RAW = [
+        ["structure", "结构化", [
+            ["face", "人脸抓拍"], ["pedestrian", "人体抓拍"], ["vehicle", "车辆抓拍"],
+            ["non_motor", "非机动车"], ["plate", "车牌"]
+        ]],
+        ["headcount_alarm", "人数统计", [
+            ["head_count", "区域人数统计"], ["cross_line", "进出口人数统计"]
+        ]],
+        ["face_basic_business", "脸人", [
+            ["face_capture", "人脸抓拍"], ["body_capture", "人体抓拍"],
+            ["face_comparison_successful", "人脸识别"], ["stranger", "陌生人"]
+        ]],
+        ["goods_alarm", "物品", [
+            ["SUNDRY_DETECT", "杂物堆放"], ["GOODS_FORGET", "物品遗留"],
+            ["GOODS_GUARD", "物品看守"], ["NEW_GOODS_DETECT", "新增杂物检测"]
+        ]],
+        ["diagnosis_alarm", "视频诊断", [
+            ["IMAGE_COVER_ALERT", "画面遮挡"]
+        ]],
+        ["gkpw_alarm", "高空抛物", [
+            ["falling_goods", "高空抛物"]
+        ]],
+        ["mclz_alarm", "明厨亮灶", [
+            ["TRASHBIN", "垃圾桶未盖"], ["MICE", "老鼠"], ["CHEF_CLOTH", "未穿戴厨师服"],
+            ["CHEF_HAT", "未佩戴厨师帽"], ["CHEF_RESPIRATOR", "未佩戴口罩"],
+            ["RUBBER_GLOVE", "未佩戴橡胶手套"], ["FLAME_WITHOUT_HUMAN", "动火离人"], ["DISH", "光盘检测"]
+        ]],
+        ["alert_alarm", "周界/行为警戒", [
+            ["PARK", "车辆禁停"], ["EXIT", "车辆离开"], ["WANDER", "人员徘徊"],
+            ["OVERWALL", "翻墙"], ["INTRUSION", "区域入侵"], ["CLIMB", "攀爬"],
+            ["ELECTRIC_BIKE_IN_ELEVATOR", "电动车进电梯"], ["TRIPWIRE", "越界"], ["FALL", "摔倒"],
+            ["SMOKING", "抽烟"], ["CALL", "打电话"], ["WATCH_POINE", "看手机"],
+            ["WATCH_PHONE", "看手机"], ["RUN", "奔跑"], ["FIGHT", "扭打"],
+            ["GATHERING", "人员聚众"], ["HOLDWEAPON", "持械"], ["LEAVE_POST", "人员离岗"],
+            ["PERSON_LESS_QUERYING", "少员"], ["PERSON_OVER_QUERYING", "超员"], ["SLEEP", "睡岗"]
+        ]],
+        ["safety_alarm", "安监", [
+            ["SAFETY_CAP", "未佩戴安全帽"], ["SAFETY_UNIFORM", "未穿戴安全工服"],
+            ["SAFETY_BELT", "未佩戴安全带"], ["FIRE", "火焰"], ["SMOKE", "烟雾"],
+            ["OIL_SPILL", "油品泄露"], ["REFLECTIVE_VEST", "反光衣"], ["FIRE_EQUIPMENT", "消防设施"],
+            ["RESPIRATOR", "口罩"], ["TOUCHED_EEBALL", "触摸静电球"], ["INSULATING_GLOVE", "未佩戴绝缘手套"]
+        ]],
+        ["jyz_alarm", "加油站", [
+            ["SAFETY_CAP", "未佩戴安全帽"], ["SAFETY_UNIFORM", "未穿戴安全工服"],
+            ["FIRE", "火焰"], ["SMOKE", "烟雾"], ["OIL_SPILL", "油品泄露"],
+            ["FIRE_EQUIPMENT", "消防设施"], ["INDICATOR_FLAG", "静电线"], ["OIL_PIPE", "卸油管检测"],
+            ["OILPUMP_DOOR_OPEN", "油机侧盖打开"], ["OIL_GUN_DRAG", "油管拉断"], ["OIL_TRUCK", "油罐车检测"]
+        ]],
+        ["edu__alarm", "教学评测", [
+            ["HEAD_UP", "抬头"], ["HEAD_DOWN", "低头"], ["STAND", "站立"],
+            ["READ", "阅读"], ["WRITE", "书写"], ["RAISE_HAND", "举手"],
+            ["REST", "趴桌"], ["PEACE", "中性"], ["LAUGH", "积极"], ["CRY", "消极"]
+        ]],
+        ["uniform_alarm", "工服注册仓", [
+            ["UNIFORM_BY_FEATURE", "未穿工服"]
+        ]],
+        ["city_alarm", "城管", [
+            ["HAWKER", "游商小贩"], ["OUTSTORE", "店外经营"], ["ROADSIDE", "占道经营"],
+            ["SUNDRYSTACK", "杂物堆放"], ["MUCK", "堆积渣土"], ["EXPOSED_GARBAGE", "暴露垃圾"],
+            ["OUTDOOR_ADV", "户外广告"], ["WATERGATHER", "道路积水"]
+        ]],
+        ["building_alarm", "工地", [
+            ["UNCOVERED_GROUND", "裸土覆盖"], ["UNCOVERED_SKIN", "皮肤裸露"], ["UNCLEANED_CAR", "车辆未喷淋"]
+        ]],
+        ["edu__style", "教学风格", [
+            ["WRITE_ON_BLACKBOARD", "板书"], ["BACK_TO_STUDENT", "背对学生"],
+            ["PODIUM_MOVEMENT", "上下讲台"], ["PATROL", "巡视"], ["WRITE", "书写"], ["LECTURE", "讲课"]
+        ]],
+        ["fire_alarm", "智慧社区", [
+            ["OVERFLOWED_GARBAGE", "垃圾满溢"], ["EXPOSED_GARBAGE", "垃圾暴漏"], ["NO_HELMET", "骑电动车未戴头盔"]
+        ]]
+    ];
+
+    // 2. 生成快速查找字典
+    const PACKAGE_NAME_MAP = {};
+    const CARD_NAME_MAP = {};
+
+    for (const [pkgKey, pkgZh, cards] of _RAW) {
+        PACKAGE_NAME_MAP[pkgKey] = pkgZh;
+        for (const [cardKey, cardZh] of cards) {
+            CARD_NAME_MAP[cardKey] = cardZh;
+        }
+    }
+
+    // 3. 辅助函数：根据 Key 获取中文，不存在则回退显示原字符
+    function getPackageLabel(name) {
+        return PACKAGE_NAME_MAP[name] || name;
+    }
+
+    function getCardLabel(card) {
+        return CARD_NAME_MAP[card] || card;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     function getStartOfDay() {
         const d = new Date();
@@ -16,9 +113,59 @@
     }
 
     let displayedAlerts = [];
-    let alertFilters = { startDate: getStartOfDay(), endDate: getEndOfDay(), deviceName: '', alertType: '' };
+    let alertFilters = { startDate: getStartOfDay(), endDate: getEndOfDay(), channelid: '',channelname: '', alertType: '' };
     let aiLoadingIds = {};
-    const alertTypes = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测'];
+    //const alertTypes = ['区域入侵', '越界检测', '车辆违停', '人员聚集', '烟火检测'];
+
+    // 当前设备（顶栏右上角选择）——预警数据自动按该设备检索
+    $: deviceName = $selectedDevice?.name || '';
+
+    $: algorithmsOptions = parseavailable_algorithms_ability($selectedDevice); // 解析出支持的算法列表
+    function parseavailable_algorithms_ability(dev) {
+        try {
+            const rawList =  JSON.parse(dev?.algorithms_ability || '[]');
+
+        } catch (e) {
+            console.error('algorithms_ability analysis failed:', e);
+            return [];
+        }
+    }
+
+    // 通道下拉项来自当前设备的通道快照（通道对象的 device_name 即通道名），默认「全通道」
+    $: channelOptions = parseChannelsNames($selectedDevice); 
+    function parseChannelsNames(dev) {
+        try {
+            const rawList = JSON.parse(dev?.channels || '[]');
+            if (!Array.isArray(rawList)) return [];
+
+            const seenIds = new Set();
+            const validChannels = [];
+
+            for (const item of rawList) {
+                // 提取唯一通道 ID（兼顾常见的几种后端字段命名）
+                const cid = item?.device_id.trim();
+                const name = item?.device_name?.trim();
+
+                // 核心校验：必须同时具备通道 ID 和 通道名称
+                if (cid && name) {
+                    // 去重：如果同一个通道 ID 出现多次，只保留第一条
+                    if (!seenIds.has(cid)) {
+                        seenIds.add(cid);
+                        validChannels.push({
+                            ...item,
+                            display_name: `${name} (${strId})`, // 预留统一显示字段（后续处理同名区分）
+                        });
+                    }
+                }
+            }
+            return validChannels;
+        } catch (e) {
+            console.error('解析通道配置失败:', e);
+            return [];
+        }
+    }
+
+
 
     // 分页状态
     let currentPage = 1;
@@ -35,14 +182,12 @@
         viewerImage = null;
     }
 
-    onMount(async () => {
-        await fetchAlerts();
-    });
-
     async function fetchAlerts() {
         try {
             const params = new URLSearchParams();
-            if (alertFilters.deviceName) params.append('deviceName', alertFilters.deviceName);
+            if (deviceName) params.append('deviceName', deviceName);
+            if (alertFilters.channelid) params.append('channelid', alertFilters.channelid);
+            if (alertFilters.channelname) params.append('channelname', alertFilters.channelname);
             if (alertFilters.alertType) params.append('alertType', alertFilters.alertType);
             if (alertFilters.startDate) params.append('startDate', alertFilters.startDate);
             if (alertFilters.endDate) params.append('endDate', alertFilters.endDate);
@@ -53,7 +198,17 @@
     }
 
     function handleResetAlertFilters() {
-        alertFilters = { startDate: getStartOfDay(), endDate: getEndOfDay(), deviceName: '', alertType: '' };
+        alertFilters = { startDate: getStartOfDay(), endDate: getEndOfDay(), channelid: '', channelname: '',alertType: '' };
+        fetchAlerts();
+    }
+
+    // 切换顶栏设备时：通道重置为「全通道」并按新设备重新检索（初次挂载也由此触发）
+    let lastDevice = null;
+    $: if (deviceName !== lastDevice) {
+        lastDevice = deviceName;
+        alertFilters.channelid = '';
+        alertFilters.channelname = '';
+        alertFilters.alertType = '';
         fetchAlerts();
     }
 
@@ -73,15 +228,22 @@
 
     function getAlertStyle(type) {
         switch (type) {
-            case '烟火检测':
-            case '区域入侵': return 'bg-rose-500/10 text-rose-400';
-            case '越界检测': return 'bg-amber-500/10 text-amber-400';
+            case 'FIRE':
+            case 'SMOKE':
+            case 'INTRUSION': return 'bg-rose-500/10 text-rose-400';
+            case 'TRIPWIRE': return 'bg-amber-500/10 text-amber-400';
             default: return 'bg-amber-500/10 text-amber-400';
         }
     }
 </script>
 
 <div class="flex flex-col h-full space-y-6">
+    <div class="flex items-center gap-2 text-xs text-slate-400 shrink-0">
+        <i class="fa-solid fa-video text-indigo-400"></i>
+        当前设备：<strong class="text-slate-200">{deviceName || '未选择'}</strong>
+        <span class="text-slate-600">·</span>
+        预警数据已自动关联右上角所选设备
+    </div>
     <div class="bg-slate-950 border border-slate-800 rounded-2xl p-5 shrink-0">
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
             <div class="flex flex-col space-y-1">
@@ -93,14 +255,19 @@
                 <input type="datetime-local" step="1" id="end" bind:value={alertFilters.endDate} class="bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-3 h-[38px] text-sm placeholder-slate-500 outline-none focus:border-indigo-500 w-full box-border" />
             </div>
             <div class="flex flex-col space-y-1">
-                <label class="text-xs text-slate-400 font-medium" for="devName">设备名称</label>
-                <input type="text" id="devName" placeholder="输入设备名称" bind:value={alertFilters.deviceName} class="bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-3 h-[38px] text-sm placeholder-slate-500 outline-none focus:border-indigo-500 w-full box-border" />
+                <label class="text-xs text-slate-400 font-medium" for="chan">通道名称</label>
+                <select id="chan" bind:value={alertFilters.channelid} class="bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-3 h-[38px] text-sm placeholder-slate-500 outline-none focus:border-indigo-500 w-full box-border">
+                    <option value="">全通道</option>
+                    {#each channelOptions as ch}<option value={ch.device_id}>{ch.display_name}</option>{/each}
+                </select>
             </div>
             <div class="flex flex-col space-y-1">
                 <label class="text-xs text-slate-400 font-medium" for="type">预警类型</label>
                 <select id="type" bind:value={alertFilters.alertType} class="bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-3 h-[38px] text-sm placeholder-slate-500 outline-none focus:border-indigo-500 w-full box-border">
                     <option value="">全部类型</option>
-                    {#each alertTypes as t}<option value={t}>{t}</option>{/each}
+                    {#each algorithmsOptions as opt}
+                        {#each opt.cards || [] as t}<option value={t}>{getCardLabel(t)}</option>{/each}
+                    {/each}
                 </select>
             </div>
             <div class="flex space-x-3 lg:justify-end">
