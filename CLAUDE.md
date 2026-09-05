@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A security-camera management platform (安防综合管理平台): FastAPI backend + Svelte 4 frontend. The backend acts as a **proxy/orchestrator in front of physical camera "BOX" devices** — it logs into them over HTTP, mirrors their channels/tasks/algorithms into a local SQLite ledger, ingests their alarm push notifications, and runs an LLM agent that can query and deploy detection tasks onto them.
+A security-camera management platform (AI视觉布控优化平台): FastAPI backend + Svelte 4 frontend. The backend acts as a **proxy/orchestrator in front of physical camera "BOX" devices** — it logs into them over HTTP, mirrors their channels/tasks/algorithms into a local SQLite ledger, ingests their alarm push notifications, and runs an LLM agent that can query and deploy detection tasks onto them.
 
 > Note: `README.md` and `GEMINI.md` are stale — they describe an older single-file `backend/main.py`. The real code is split into `routers/` + `services/`. Trust the code, not those docs.
 
@@ -69,3 +69,8 @@ Svelte 4 + Vite, Tailwind via CDN (no build-time Tailwind), Font Awesome icons.
 - Backend CORS is fully open (`*`) — dev-only.
 - Timestamps are **milliseconds since epoch** (`int(time.time() * 1000)`) throughout the DB.
 - Design/planning docs for major features live in `docs/superpowers/{plans,specs}/`.
+
+## Code Modification Rules
+- **Respect User Edits:** Never revert, overwrite, or roll back user modifications unless explicitly commanded.
+- **Incremental Changes Only:** Assume all existing code is the latest single source of truth. Treat differences from legacy implementations as intentional upgrades, not bugs.
+- **Diff/Patch First:** When proposing changes to existing files, output only unified diffs or minimum viable updates instead of rewriting full functions or whole files.

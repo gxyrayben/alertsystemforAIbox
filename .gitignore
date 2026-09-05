@@ -26,6 +26,7 @@ dist/
 backend/uploads/
 backend/*.jpg
 backend/test_payload.json
+logs/
 
 # IDEs
 .idea/

@@ -58,6 +58,8 @@ async def lifespan(app: FastAPI):
         dev_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(devices)"))).fetchall()]
         if "agents" not in dev_cols:
             await conn.execute(text("ALTER TABLE devices ADD COLUMN agents TEXT DEFAULT '[]'"))
+        if "algorithms_ability" not in dev_cols:
+            await conn.execute(text("ALTER TABLE devices ADD COLUMN algorithms_ability TEXT DEFAULT '[]'"))
         # 兼容旧库：alerts 表补充告警反馈闭环所需列
         alert_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(alerts)"))).fetchall()]
         _alert_migrations = {
