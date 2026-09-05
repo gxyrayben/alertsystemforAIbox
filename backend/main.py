@@ -64,7 +64,8 @@ async def lifespan(app: FastAPI):
         alert_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(alerts)"))).fetchall()]
         _alert_migrations = {
             "imageUrlCrop": "ALTER TABLE alerts ADD COLUMN imageUrlCrop TEXT",
-            "channel": "ALTER TABLE alerts ADD COLUMN channel TEXT DEFAULT ''",
+            "channelid": "ALTER TABLE alerts ADD COLUMN channelid TEXT DEFAULT ''",
+            "channelname": "ALTER TABLE alerts ADD COLUMN channelname TEXT DEFAULT ''",
             "feedback_status": "ALTER TABLE alerts ADD COLUMN feedback_status TEXT DEFAULT ''",
             "feedback_note": "ALTER TABLE alerts ADD COLUMN feedback_note TEXT DEFAULT ''",
             "feedback_time": "ALTER TABLE alerts ADD COLUMN feedback_time BIGINT",

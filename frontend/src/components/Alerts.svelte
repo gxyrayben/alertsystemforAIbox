@@ -293,7 +293,6 @@
                 <label class="text-xs text-slate-400 font-medium" for="type">预警类型</label>
                 <select id="type" bind:value={alertFilters.alertType} class="bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-3 h-[38px] text-sm placeholder-slate-500 outline-none focus:border-indigo-500 w-full box-border">
                     <option value="">全部类型</option>
-                    
                     {#each algorithmsOptions as opt}
                         <optgroup label={getPackageLabel(opt.name)}>
                             {#each opt.cards || [] as t}<option value={t}>{getCardLabel(t)}</option>{/each}
@@ -302,7 +301,7 @@
                     {#if agentsOptions.length > 0}
                         <optgroup label="Agents">
                             {#each agentsOptions as ag}
-                                <option value={ag.agent_id}>{ag.agent_name}</option>
+                                <option value={ag.event_id}>{ag.event_tag}</option>
                             {/each}
                         </optgroup>
                     {/if}

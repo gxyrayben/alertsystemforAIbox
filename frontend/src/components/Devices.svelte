@@ -15,6 +15,7 @@
     let isFetchDetailModalOpen = false;
     let currentDetailDevice = null;
     let isFetching = false;
+    let isRefreshingAll = false;   // 新增：一键刷新所有设备状态
 
     onMount(async () => {
         await fetchDevices();
@@ -72,6 +73,25 @@
         }
     }
 
+    // 刷新列表：对每台设备重新联系设备端拉取最新状态（复用 /fetch），再刷新列表
+    async function handleRefreshAll() {
+        if (isRefreshingAll || devices.length === 0) return;
+        isRefreshingAll = true;
+        try {
+            const results = await Promise.allSettled(
+                devices.map(d => apiPost(`/devices/${d.id}/fetch`))
+            );
+            const failed = results.filter(r => r.status === 'rejected').length;
+            await fetchDevices();
+            if (failed > 0) alert(`${failed} 台设备刷新失败（可能离线或不可达）。`);
+        } catch (e) {
+            console.error(e);
+            alert('刷新列表失败，请稍后重试。');
+        } finally {
+            isRefreshingAll = false;
+        }
+    }
+
     function openDeviceModal(device = null) {
         if (device) {
             deviceFormData = { ...device };
@@ -98,9 +118,15 @@
 <div class="bg-slate-950 border border-slate-800 rounded-2xl flex flex-col h-full">
     <div class="px-6 py-5 border-b border-slate-800 bg-slate-900/40 flex justify-between items-center">
         <div class="text-sm text-slate-400">共找到 <span class="font-bold text-slate-100">{devices.length}</span> 个设备</div>
-        <button on:click={() => openDeviceModal()} class="flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-sm text-sm font-bold">
-            <i class="fa-solid fa-plus text-sm mr-2"></i> 添加设备
-        </button>
+        <div class="flex items-center space-x-3">
+            <button on:click={handleRefreshAll} disabled={isRefreshingAll || devices.length === 0} class="flex items-center px-4 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 rounded-xl shadow-sm text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">
+                <i class="fa-solid fa-arrows-rotate text-sm mr-2 {isRefreshingAll ? 'animate-spin' : ''}"></i>
+                {isRefreshingAll ? '刷新中...' : '刷新列表'}
+            </button>
+            <button on:click={() => openDeviceModal()} class="flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-sm text-sm font-bold">
+                <i class="fa-solid fa-plus text-sm mr-2"></i> 添加设备
+            </button>
+        </div>
     </div>
     <div class="flex-1 overflow-auto">
         <table class="w-full text-left border-collapse">

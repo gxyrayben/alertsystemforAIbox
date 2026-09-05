@@ -55,7 +55,8 @@ class Alert(BaseModel):
     timestamp: int
     imageUrl: Optional[str] = None
     imageUrlCrop: Optional[str] = None
-    channel: Optional[str] = ""
+    channelid: Optional[str] = ""
+    channelname: Optional[str] = ""
     remark: Optional[str] = "暂无备注"
     feedback_status: Optional[str] = ""
     feedback_note: Optional[str] = ""
@@ -81,7 +82,7 @@ class FeedbackTaskResponse(BaseModel):
     batch_id: str
     device_name: str
     task_name: str = ""
-    channel: str = ""
+    channelid: str = ""
     category: str = ""
     case_key: str = ""
     action: str

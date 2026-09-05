@@ -39,7 +39,7 @@ def _snapshot_alerts(alerts: List[AlertORM]) -> List[dict]:
         {
             "id": a.id,
             "alertType": a.alertType,
-            "channel": a.channel or "",
+            "channelid": a.channelid or "",
             "time": a.time,
             "timestamp": a.timestamp,
             "imageUrl": a.imageUrl,
@@ -53,11 +53,11 @@ def _snapshot_alerts(alerts: List[AlertORM]) -> List[dict]:
 
 def _channels(alerts: List[AlertORM]) -> str:
     """组内去重通道，逗号连接。"""
-    return ",".join(sorted({a.channel for a in alerts if a.channel}))
+    return ",".join(sorted({a.channelid for a in alerts if a.channelid}))
 
 
 def _add_record(db: AsyncSession, batch_id: str, created_at: int, *, device_name: str,
-                task_name: str, channel: str, category: str, case_key: str, action: str,
+                task_name: str, channelid: str, category: str, case_key: str, action: str,
                 result: str, detail: str, alerts: List[AlertORM], log_id: str = "") -> None:
     """新增一条调优下发运维记录（延后随所在设备批次一起 commit）。"""
     db.add(FeedbackTaskORM(
@@ -65,7 +65,7 @@ def _add_record(db: AsyncSession, batch_id: str, created_at: int, *, device_name
         batch_id=batch_id,
         device_name=device_name,
         task_name=task_name,
-        channel=channel,
+        channelid=channelid,
         category=category,
         case_key=case_key or "",
         action=action,
@@ -319,13 +319,13 @@ async def run_optimization(db: AsyncSession, alert_ids: Optional[List[str]] = No
                 task_name = task.get("task_name") or task_id
                 log_id = ""
                 try:
-                    if category == "大模型任务":
+                    if category == "agent_task":
                         ok, msg, log_id = await _optimize_case1(client, device, db, task, grp_alerts)
                         case_key = "Case1"
-                    elif category == "小模型任务":
+                    elif category == "small_task":
                         ok, msg, log_id = await _optimize_monitor(client, device, db, task, mon, grp_alerts, with_prompt=False)
                         case_key = "Case2"
-                    elif category == "小+大任务":
+                    elif category == "small_and_agent_task":
                         ok, msg, log_id = await _optimize_monitor(client, device, db, task, mon, grp_alerts, with_prompt=True)
                         case_key = "Case3"
                     else:
@@ -335,7 +335,7 @@ async def run_optimization(db: AsyncSession, alert_ids: Optional[List[str]] = No
 
                 _add_record(
                     db, batch_id, created_at,
-                    device_name=device_name, task_name=task_name, channel=_channels(grp_alerts),
+                    device_name=device_name, task_name=task_name, channelid=_channels(grp_alerts),
                     category=category, case_key=case_key or "",
                     action="deployed" if ok else "skipped", result=msg, detail=msg,
                     alerts=grp_alerts, log_id=log_id,
@@ -369,7 +369,7 @@ def _skip(db: AsyncSession, batch_id: str, created_at: int, summary: dict,
     })
     _add_record(
         db, batch_id, created_at,
-        device_name=device_name, task_name=device_name, channel=_channels(alerts),
+        device_name=device_name, task_name=device_name, channelid=_channels(alerts),
         category="-", case_key="", action="skipped", result=reason, detail=reason,
         alerts=alerts,
     )

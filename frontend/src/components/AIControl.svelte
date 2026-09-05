@@ -629,7 +629,7 @@
                                                                         </button>
                                                                     </td>
                                                                 {:else if col.key === 'category'}
-                                                                    <td class="px-2.5 py-1.5 text-slate-300 align-top break-all max-w-[160px]">{row.category === '大模型任务' ? '智能体任务' : (row.category ?? '—')}</td>
+                                                                    <td class="px-2.5 py-1.5 text-slate-300 align-top break-all max-w-[160px]">{row.category === 'agent_task' ? '智能体任务' : (row.category ?? '—')}</td>
                                                                 {:else}
                                                                     <td class="px-2.5 py-1.5 text-slate-300 align-top break-all max-w-[160px]">{row[col.key] ?? '—'}</td>
                                                                 {/if}

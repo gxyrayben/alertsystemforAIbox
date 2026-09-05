@@ -28,7 +28,8 @@ class AlertORM(Base):
     timestamp = Column(BigInteger, index=True)
     imageUrl = Column(String, nullable=True)        # 告警大图（整帧）
     imageUrlCrop = Column(String, nullable=True)     # 送检小图（目标裁切），无则为空
-    channel = Column(String, default="", index=True) # 触发通道（device_name），旧数据可能为空
+    channelid = Column(String, default="", index=True) # 触发通道（device_name），旧数据可能为空
+    channelname = Column(String, default="", index=True) # 触发通道（device_name），旧数据可能为空
     remark = Column(String, default="")
     # 告警反馈闭环：'' 待标注 / 'valid' 真实告警 / 'false_positive' 误报
     feedback_status = Column(String, default="", index=True)
@@ -76,7 +77,7 @@ class FeedbackTaskORM(Base):
     batch_id = Column(String, index=True)             # 归组同一次提交
     device_name = Column(String, index=True)
     task_name = Column(String, default="")            # 设备布控任务名（跳过批次填设备名/占位）
-    channel = Column(String, default="")              # 该组去重通道，逗号连接
+    channelid = Column(String, default="")              # 该组去重通道，逗号连接
     category = Column(String, default="")             # 大模型任务/小模型任务/小+大任务/-
     case_key = Column(String, default="")             # Case1/Case2/Case3/空
     action = Column(String, default="skipped")        # deployed / skipped
