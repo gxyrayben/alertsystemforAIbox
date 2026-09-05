@@ -31,7 +31,7 @@
             ["CHEF_HAT", "未佩戴厨师帽"], ["CHEF_RESPIRATOR", "未佩戴口罩"],
             ["RUBBER_GLOVE", "未佩戴橡胶手套"], ["FLAME_WITHOUT_HUMAN", "动火离人"], ["DISH", "光盘检测"]
         ]],
-        ["alert_alarm", "周界/行为警戒", [
+        ["alert_alarm", "警戒算法", [
             ["PARK", "车辆禁停"], ["EXIT", "车辆离开"], ["WANDER", "人员徘徊"],
             ["OVERWALL", "翻墙"], ["INTRUSION", "区域入侵"], ["CLIMB", "攀爬"],
             ["ELECTRIC_BIKE_IN_ELEVATOR", "电动车进电梯"], ["TRIPWIRE", "越界"], ["FALL", "摔倒"],
@@ -120,13 +120,41 @@
     // 当前设备（顶栏右上角选择）——预警数据自动按该设备检索
     $: deviceName = $selectedDevice?.name || '';
 
+    /* algorithms_ability = [
+        { name: " packageA", cards: ["LEAVE_POST", "SMOKING", "RUN"] },
+        { name: "packageB", cards: ["FALL", "SLEEP"] }
+        ];
+
+        agents [{
+            "agent_id": item.get("agent_id"),
+            "agent_name": item.get("agent_name"),
+            "event_id": item.get("event_id"),
+            "event_tag": item.get("event_tag"),
+            "alarm_condition": item.get("alarm_condition"),
+            "alarm_type": item.get("alarm_type"),
+            "prompt": item.get("prompt", ""),
+        }]
+    */
     $: algorithmsOptions = parseavailable_algorithms_ability($selectedDevice); // 解析出支持的算法列表
     function parseavailable_algorithms_ability(dev) {
         try {
-            const rawList =  JSON.parse(dev?.algorithms_ability || '[]');
+            const algorithms_ability = JSON.parse(dev?.algorithms_ability || '[]');
+            return algorithms_ability;
 
         } catch (e) {
             console.error('algorithms_ability analysis failed:', e);
+            return [];
+        }
+    }
+
+    $: agentsOptions = parseavailable_agents_ability($selectedDevice); // 解析出支持的agents列表
+    function parseavailable_agents_ability(dev) {
+        try {
+            const agents = JSON.parse(dev?.agents || '[]');
+            return agents;
+
+        } catch (e) {
+            console.error('agents analysis failed:', e);
             return [];
         }
     }
@@ -153,7 +181,7 @@
                         seenIds.add(cid);
                         validChannels.push({
                             ...item,
-                            display_name: `${name} (${strId})`, // 预留统一显示字段（后续处理同名区分）
+                            display_name: `${name}-${cid}`, // 预留统一显示字段（后续处理同名区分）
                         });
                     }
                 }
@@ -265,9 +293,19 @@
                 <label class="text-xs text-slate-400 font-medium" for="type">预警类型</label>
                 <select id="type" bind:value={alertFilters.alertType} class="bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-3 h-[38px] text-sm placeholder-slate-500 outline-none focus:border-indigo-500 w-full box-border">
                     <option value="">全部类型</option>
+                    
                     {#each algorithmsOptions as opt}
-                        {#each opt.cards || [] as t}<option value={t}>{getCardLabel(t)}</option>{/each}
+                        <optgroup label={getPackageLabel(opt.name)}>
+                            {#each opt.cards || [] as t}<option value={t}>{getCardLabel(t)}</option>{/each}
+                        </optgroup>
                     {/each}
+                    {#if agentsOptions.length > 0}
+                        <optgroup label="Agents">
+                            {#each agentsOptions as ag}
+                                <option value={ag.agent_id}>{ag.agent_name}</option>
+                            {/each}
+                        </optgroup>
+                    {/if}
                 </select>
             </div>
             <div class="flex space-x-3 lg:justify-end">
