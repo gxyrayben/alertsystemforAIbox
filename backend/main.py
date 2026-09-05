@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
     await alarm_services.shutdown_services()
     scheduler.shutdown()
 
-app = FastAPI(title="安防综合管理平台 API", lifespan=lifespan)
+app = FastAPI(title="AI布控智能体 API", lifespan=lifespan)
 
 # 启用 CORS
 app.add_middleware(
