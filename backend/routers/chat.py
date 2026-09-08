@@ -29,6 +29,7 @@ _TABLE_SPECS = {
             {"key": "device_name", "label": "通道名称"},
             {"key": "proto", "label": "协议"},
             {"key": "rtsp", "label": "取流地址"},
+            {"key": "onlinestatus", "label": "在线状态"},
         ],
     },
     "get_device_control_tasks": {
@@ -181,10 +182,10 @@ async def _run_agent(config, user_messages, db: AsyncSession, system_prompt: str
     proposal = None
     for _ in range(5):
         result = await llm_client.chat_with_tools(config, messages, TOOLS)
-        if "text" in result:
+        if "text" in result:           # if this is a result solution, return to userspace
             return result["text"], tables, proposal
 
-        tc = result["tool_call"]
+        tc = result["tool_call"]       # else  ,need to call tools to get next data ;
         tool_result = await execute_tool(tc["name"], tc.get("arguments", {}), db)
         table = _build_table(tc["name"], tool_result)
         if table:

@@ -456,6 +456,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             [{"device_id": d.device_id, "name": d.name, "status": d.status} for d in rows],
             ensure_ascii=False)
 
+    """
     if name == "list_tasks":
         device_id = args.get("device_id", "")
         rows = (await db.execute(select(TaskORM).where(TaskORM.device_id == device_id))).scalars().all()
@@ -464,6 +465,23 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
               "device_task": t.device_task, "algorithms": t.algorithms,
               "status": t.status, "priority": t.priority, "task_type": t.task_type}
              for t in rows],
+            ensure_ascii=False,
+        )
+    """
+
+    if name == "list_tasks":
+        device = await _get_device(db, args.get("device_id", ""))
+        if not device:
+            return _err(f"未找到设备 {args.get('device_id') or '(未指定)'}，请先在『设备接入』添加设备并执行『获取详情』")
+
+        devices_tasks = _load_json(device.device_tasks)
+        #return _ok({"device_id": device.device_id, "device_name": device.name,
+        #            "count": len(channels), "channels": channels})
+        return json.dumps(
+            [{"id": t.id, "name": t.name, "channel": t.channel,
+                "device_task": t.device_task, "algorithms": t.algorithms,
+                "status": t.status, "priority": t.priority, "task_type": t.task_type}
+                for t in rows],
             ensure_ascii=False,
         )
 
