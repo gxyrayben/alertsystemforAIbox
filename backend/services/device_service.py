@@ -186,7 +186,7 @@ def _index_monitors(monitor_list: list) -> tuple[list, str]:
 
     return results ,task_type
 
-def _summarize_tasks_algorithm(task_list: list, monitor_by_task: list) -> List[dict]:
+def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] = None) -> Tuple[List[dict], set]:
     """把设备原始任务列表压成前端展示用摘要，并收集全部算法 id。
 
     注意：task_list 中 agent_list 的智能体项使用 event_id/event_tag（非 agent_id）；
@@ -194,20 +194,20 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: list) -> List[d
     故通过 monitor_by_task（按 task_id 建索引）补齐『关联智能体/算法』列与查看回填用 detail。
     """
     monitor_by_task = monitor_by_task or []
-    
+    algorithms = set()
     task_list_all = []
     for task in task_list:
-        algorithms = []
         task_agents = []
-        task_type = task.get("task_type", {}) or {}
-        task_id = task.get("task_id", {}) or {}
-        task_name = task.get("task_name", {}) or {}
+        task_type = task.get("task_type", "")
+        task_id = task.get("task_id", "") 
+        task_name = task.get("task_name", "") 
         device_lists = task.get("device_list", []) 
-        device_name = device_lists[0].get("device_name")
-        device_id = device_lists[0].get("device_id")
+        first_dev = device_lists[0] if device_lists else {}
+        device_name = first_dev.get("device_name","")
+        device_id = first_dev.get("device_id","")
 
         if task_type == "agent_real_task":
-            agent_list = task.get("agent_list", []) or []
+            agent_list = task.get("agent_list", [])
             for a in agent_list :
                 task_agents.append({
                     "agent_id": a.get("event_id", "") ,
@@ -221,12 +221,12 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: list) -> List[d
                 "camera_device_name": device_name,
                 "camere_device_id": device_id,
                 "agents_tasks":task_agents,
-                "monitor_tasks":algorithms,
+                "monitor_tasks":[],
             })
 
     task_list_all.extend(monitor_by_task)
 
-    return task_list_all
+    return task_list_all, algorithms
 
 
 def _summarize_tasks(task_list: list, monitor_by_task: list) -> Tuple[List[dict], set]:
@@ -256,7 +256,7 @@ def _summarize_tasks(task_list: list, monitor_by_task: list) -> Tuple[List[dict]
         mon = mon_entry.get("monitor")
         algo_name = algorithm_catalog.event_name(mon_entry.get("event_type", "")) if mon_entry else ""
 
-        agent_join = ", ".join(agent_tags) #  将agenttags 转变成字符串并用,分割
+        agent_join = ", ".join(agent_tags) ##  将agenttags 转变成字符串并用,分割
 
         # 『关联智能体/算法』列：大模型→智能体名(不变)；小模型→小模型算法中文名；小+大→『小模型/智能体』
         if category == "small_task":
@@ -477,7 +477,6 @@ class DeviceService:
 
     @staticmethod
     async def _fetch_task_summaries(client: httpx.AsyncClient, base_url: str, ip: str) -> Tuple[List[dict], set]:
-        monitor_by_task=[]
         try:
             res = await client.post(f"{base_url}/intelli_manager/task_list", json=TASK_LIST_BODY)
             if res.status_code == 200 and res.json().get("code") == 0:
@@ -504,17 +503,19 @@ class DeviceService:
         """拉取 monitor 列表并按 task_id 建索引；失败/接口不存在时返回空 dict（优雅降级）。
         会话 cookie 已在 fetch_device_data 登录阶段设置到 client 上，此处直接复用。"""
         results : List[dict] = []
-        monitor_param : List[dict] = []
-        agents_tasks  = []
         try:
             for task in task_list:
-                task_type = task.get("task_type", {}) or {}
-                task_id = task.get("task_id", {}) or {}
+                
+                task_type = task.get("task_type", "") 
+                task_id = task.get("task_id", "") 
                 device_lists = task.get("device_list", []) 
-                device_id = device_lists[0].get("device_id")
+                first_dev = device_lists[0] if device_lists else {}
+                device_id = first_dev.get("device_id")
+                device_name = first_dev.get("device_name")
                 if not device_id or not task_id:
                     continue
                 # fetch small task 
+                monitor_param : List[dict] = []
                 if task_type == "single_point_task":
                     res = await client.post(f"{base_url}{MONITOR_LIST_PATH}", json={"device_id": device_id, "task_id": task_id})
                     if res.status_code == 200 and res.json().get("code") == 0:
@@ -524,11 +525,11 @@ class DeviceService:
                     results.append({
                         "task_type":task_type,
                         "task_id": task_id, 
-                        "task_name": task.get("task_name", {}) or {}, 
-                        "camera_device_name": device_id.get("device_id",{}),
-                        "camera_device_id": device_id.get("device_name",{}),
+                        "task_name": task.get("task_name", ""), 
+                        "camera_device_name": device_name,
+                        "camera_device_id": device_id,
                         "monitor_tasks": monitor_param,
-                        "agents_tasks": agents_tasks,
+                        "agents_tasks": [],
                     })
 
             return results

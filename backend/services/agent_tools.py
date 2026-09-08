@@ -473,7 +473,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         device = await _get_device(db, args.get("device_id", ""))
         if not device:
             return _err(f"未找到设备 {args.get('device_id') or '(未指定)'}，请先在『设备接入』添加设备并执行『获取详情』")
-
+        
         devices_tasks = _load_json(device.device_tasks)
         #return _ok({"device_id": device.device_id, "device_name": device.name,
         #            "count": len(channels), "channels": channels})
