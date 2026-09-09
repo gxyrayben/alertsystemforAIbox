@@ -242,6 +242,7 @@
                                     <th class="px-6 py-3">设备ID (device_id)</th>
                                     <th class="px-6 py-3">设备名称 (device_name)</th>
                                     <th class="px-6 py-3">协议类型 (proto)</th>
+                                    <th class="px-6 py-3">在线状态 (onlinestatus)</th>
                                     <th class="px-6 py-3">取流地址 (rtsp)</th>
                                 </tr>
                             </thead>
@@ -253,6 +254,7 @@
                                         <td class="px-6 py-4">
                                             <span class="px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded text-[10px] font-bold">{ch.proto}</span>
                                         </td>
+                                        <td class="px-6 py-4 font-medium text-slate-100">{ch.onlinestatus}</td>
                                         <td class="px-6 py-4 font-mono text-xs text-slate-400 break-all">{ch.rtsp}</td>
                                     </tr>
                                 {:else}
