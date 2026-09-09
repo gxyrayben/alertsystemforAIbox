@@ -38,10 +38,10 @@ _TABLE_SPECS = {
         "columns": [
             {"key": "task_id", "label": "任务ID"},
             {"key": "task_name", "label": "任务名称"},
-            {"key": "category", "label": "任务类型"},
-            {"key": "device_name", "label": "通道名称"},
-            {"key": "status", "label": "任务状态"},
-            {"key": "agent_name", "label": "关联智能体/算法"},
+            {"key": "task_type", "label": "任务类型"},
+            {"key": "camera_device_name", "label": "通道名称"},
+            {"key": "task_status", "label": "任务状态"},
+            {"key": "algorithms", "label": "关联智能体/算法"},
             {"key": "action", "label": "操作", "type": "action"},
         ],
     },
@@ -181,12 +181,15 @@ async def _run_agent(config, user_messages, db: AsyncSession, system_prompt: str
     tables = []
     proposal = None
     for _ in range(5):
+        #print(f"before chat_with_tools: {messages}")
         result = await llm_client.chat_with_tools(config, messages, TOOLS)
+        #print(f"after chat_with_tools: {result}")
         if "text" in result:           # if this is a result solution, return to userspace
             return result["text"], tables, proposal
 
         tc = result["tool_call"]       # else  ,need to call tools to get next data ;
         tool_result = await execute_tool(tc["name"], tc.get("arguments", {}), db)
+        print(f"after execute_tool: {tool_result}")
         table = _build_table(tc["name"], tool_result)
         if table:
             tables.append(table)

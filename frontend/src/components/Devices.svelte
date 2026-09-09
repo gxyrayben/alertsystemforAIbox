@@ -275,8 +275,10 @@
                                 <tr class="bg-slate-900/60 border-b border-slate-800 text-slate-500 text-[11px] font-semibold uppercase tracking-wider">
                                     <th class="px-6 py-3">任务ID (task_id)</th>
                                     <th class="px-6 py-3">任务名称 (task_name)</th>
-                                    <th class="px-6 py-3">关联通道 (device_name)</th>
-                                    <th class="px-6 py-3">智能体算法 (agent_id)</th>
+                                    <th class="px-6 py-3">关联通道 (camera_device_name)</th>
+                                    <th class="px-6 py-3">状态 (task_status)</th>
+                                    <th class="px-6 py-3">智能体算法 (algorithms)</th>
+                                    
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-800 text-sm">
@@ -284,8 +286,9 @@
                                     <tr class="hover:bg-slate-900/60 transition-colors">
                                         <td class="px-6 py-4 font-mono text-slate-400">{t.task_id}</td>
                                         <td class="px-6 py-4 font-medium text-slate-100">{t.task_name}</td>
-                                        <td class="px-6 py-4 text-slate-400">{t.device_name}</td>
-                                        <td class="px-6 py-4 font-mono text-indigo-400 uppercase text-xs">{t.agent_id}</td>
+                                        <td class="px-6 py-4 text-slate-400">{t.camera_device_name}</td>
+                                        <td class="px-6 py-4 font-medium text-slate-100">{t.task_status}</td>
+                                        <td class="px-6 py-4 font-mono text-indigo-400 uppercase text-xs">{t.algorithms}</td>
                                     </tr>
                                 {:else}
                                     <tr><td colspan="4" class="px-6 py-10 text-center text-slate-500">暂无布控任务数据</td></tr>

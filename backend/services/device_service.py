@@ -143,7 +143,7 @@ def _task_status(task: dict) -> str:
     return "启用" if task.get("enable") else "停用"
 
 
-def _index_monitors(monitor_list: list) -> tuple[list, str]:
+def _index_monitors(monitor_list: list) -> tuple[list, str, set]:
     """把 monitor 列表按其归属的 task_id（字符串）建索引，供任务摘要富化小模型算法信息。
 
     每项值保留原始 monitor（供 task_builders.monitor_to_panel_config 做逆映射）并预取
@@ -151,6 +151,7 @@ def _index_monitors(monitor_list: list) -> tuple[list, str]:
     """
     results=[]
     algorithms_packages = []
+    algorithms: set = set()
     for mon in monitor_list or []:
         task_type = "small_task"
         common = mon.get("common_param") or {}
@@ -165,10 +166,13 @@ def _index_monitors(monitor_list: list) -> tuple[list, str]:
             agentLLMParam = r.get("extendParams",{}).get("aiotapCustom",{}).get("agentLLMParam",{})
             if(agentLLMParam):
                 task_type="small_and_agent_task"
-
+                algorithms.add(f"SM-{r.get("eventType")}-AG-{agentLLMParam.get("event_tag")}")
+            else:
+                task_type="small_task"
+                algorithms.add(f"SM-{r.get("eventType")}")
             algorithms_packages.append({
                 "major_type":algoCabinName,
-                "minor_type": r.get("event_type"), 
+                "minor_type": r.get("eventType"), 
                 "agent_alarm_type": agentLLMParam.get("alarm_type"),
                 "agent_event_id": agentLLMParam.get("event_id"),
                 "agent_event_tag": agentLLMParam.get("event_tag"),
@@ -184,7 +188,7 @@ def _index_monitors(monitor_list: list) -> tuple[list, str]:
         "algorithms_packages":algorithms_packages,
         })
 
-    return results ,task_type
+    return results ,task_type, algorithms
 
 def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] = None) -> Tuple[List[dict], set]:
     """把设备原始任务列表压成前端展示用摘要，并收集全部算法 id。
@@ -195,12 +199,24 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] 
     """
     monitor_by_task = monitor_by_task or []
     algorithms = set()
+    STATUS_MAP = {
+        0: "未启用",
+        1: "正常",
+    }
     task_list_all = []
     for task in task_list:
         task_agents = []
+        task_status = "未知"
         task_type = task.get("task_type", "")
         task_id = task.get("task_id", "") 
         task_name = task.get("task_name", "") 
+        raw_status = task.get("task_state")
+        if(raw_status == 0):
+            task_status = "未启用"
+        if(raw_status == 1):
+            task_status = "正常"
+            
+        #task_status = STATUS_MAP.get(raw_status, "未知")
         device_lists = task.get("device_list", []) 
         first_dev = device_lists[0] if device_lists else {}
         device_name = first_dev.get("device_name","")
@@ -209,6 +225,7 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] 
         if task_type == "agent_real_task":
             agent_list = task.get("agent_list", [])
             for a in agent_list :
+                algorithms.add(f"AG-{a.get("event_tag")}")
                 task_agents.append({
                     "agent_id": a.get("event_id", "") ,
                     "agent_name": a.get("event_tag"),
@@ -218,11 +235,16 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] 
                 "task_type": task_type,
                 "task_id": task_id,
                 "task_name": task_name,
+                "task_status": task_status,
                 "camera_device_name": device_name,
-                "camere_device_id": device_id,
+                "camera_device_id": device_id,
                 "agents_tasks":task_agents,
+                "algorithms":list(algorithms),
                 "monitor_tasks":[],
             })
+
+    for task in monitor_by_task:
+        algorithms.update(task.get("algorithms",[]))
 
     task_list_all.extend(monitor_by_task)
 
@@ -503,11 +525,24 @@ class DeviceService:
         """拉取 monitor 列表并按 task_id 建索引；失败/接口不存在时返回空 dict（优雅降级）。
         会话 cookie 已在 fetch_device_data 登录阶段设置到 client 上，此处直接复用。"""
         results : List[dict] = []
+        # 1. 定义状态码映射字典
+        STATUS_MAP = {
+            0: "未启用",
+            1: "正常",
+        }
+
         try:
             for task in task_list:
-                
+                task_status = "未知"
+                raw_status = task.get("task_state")
+                if(raw_status == 0):
+                    task_status = "未启用"
+                if(raw_status == 1):
+                    task_status = "正常"
                 task_type = task.get("task_type", "") 
                 task_id = task.get("task_id", "") 
+                #raw_status = task.get("task_state")
+                #task_status = STATUS_MAP.get(raw_status, "未知")
                 device_lists = task.get("device_list", []) 
                 first_dev = device_lists[0] if device_lists else {}
                 device_id = first_dev.get("device_id")
@@ -516,19 +551,22 @@ class DeviceService:
                     continue
                 # fetch small task 
                 monitor_param : List[dict] = []
+                algorithms: set = set()
                 if task_type == "single_point_task":
                     res = await client.post(f"{base_url}{MONITOR_LIST_PATH}", json={"device_id": device_id, "task_id": task_id})
                     if res.status_code == 200 and res.json().get("code") == 0:
-                         monitor_data, task_type = _index_monitors(res.json().get("data", {}).get("param", []))
+                         monitor_data, task_type ,algorithms = _index_monitors(res.json().get("data", {}).get("param", []))
                          monitor_param.extend(monitor_data)
 
                     results.append({
                         "task_type":task_type,
                         "task_id": task_id, 
                         "task_name": task.get("task_name", ""), 
+                        "task_status":task_status,
                         "camera_device_name": device_name,
                         "camera_device_id": device_id,
                         "monitor_tasks": monitor_param,
+                        "algorithms": list(algorithms),
                         "agents_tasks": [],
                     })
 

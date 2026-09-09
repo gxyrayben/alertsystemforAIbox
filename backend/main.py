@@ -1,3 +1,8 @@
+# 运行日志:在任何其它导入/输出之前,安装 stdout/stderr 透明捕获,
+# 把 print 内容(含报错堆栈、uvicorn 输出)按天落盘到 logs/backend-YYYY-MM-DD.log。
+from log_setup import setup_run_logging
+setup_run_logging()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

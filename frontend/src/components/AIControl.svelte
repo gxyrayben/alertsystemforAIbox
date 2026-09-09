@@ -628,8 +628,8 @@
                                                                             <i class="fa-solid fa-eye mr-1"></i>查看
                                                                         </button>
                                                                     </td>
-                                                                {:else if col.key === 'category'}
-                                                                    <td class="px-2.5 py-1.5 text-slate-300 align-top break-all max-w-[160px]">{row.category === 'agent_task' ? '智能体任务' : (row.category ?? '—')}</td>
+                                                                {:else if col.key === 'algorithms'}
+                                                                    <td class="px-2.5 py-1.5 text-slate-300 align-top break-all max-w-[160px]">{row[col.key] ?? '—'}</td>
                                                                 {:else}
                                                                     <td class="px-2.5 py-1.5 text-slate-300 align-top break-all max-w-[160px]">{row[col.key] ?? '—'}</td>
                                                                 {/if}
