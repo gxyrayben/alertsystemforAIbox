@@ -369,8 +369,11 @@ class DeviceService:
     @staticmethod
     async def get_authorization(client, device, db=None):
         """算法授权文件信息（/intelli_manager/authorization_document）。"""
+        #/intelli_manager/alg_warehouse/packet_list
         return await DeviceService.authed_post(
-            client, device, db, "/intelli_manager/authorization_document", {"offset": 0, "size": 100})
+                    client, device, db, "/intelli_manager/alg_warehouse/packet_list", {"offset": 0, "size": 100})
+        #return await DeviceService.authed_post(
+        #    client, device, db, "/intelli_manager/authorization_document", {"offset": 0, "size": 100})
 
     @staticmethod
     async def list_alg_warehouses(client, device, db=None):

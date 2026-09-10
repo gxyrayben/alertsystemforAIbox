@@ -194,14 +194,14 @@ async def _authorized_packages(client, device, db):
     if data.get("code") != 0:
         return None, data.get("message", "查询算法授权失败")
     by_name = {}
-    for r in data.get("data", {}).get("result", []):
-        for af in r.get("auth_file_info", []):
-            for a in af.get("alg_info", []):
-                name = a.get("package_name", "")
+    for r in data.get("data", {}).get("list", []):
+        for af in r.get("pocket", []):
+            for a in af.get("cards", []):
+                name = a.get("type", "")
                 if not name or name in by_name:
                     continue
                 # 设备返回的键为 desc（此前误读为 desp 导致说明恒为空）
-                by_name[name] = {"package_name": name, "desp": a.get("desc", "")}
+                by_name[name] = {"package_name": name, "desp": af.get("name", "")}
     return list(by_name.values()), None
 
 
@@ -538,11 +538,11 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                     "eventType": event_type,
                     "eventName": _alg_event_name(event_type),  # 英文算法ID → 中文事件名
                     "targetTypes": at.get("target_type", []),
-                    "description": w.get("alg_description", ""),
+                    "description": w.get("status", ""),
                 })
         if not rows:  # card_cap 无数据时至少列出算法仓
             rows = [{"algoCabinName": w.get("alg_name", ""), "version": w.get("alg_version", "V2.0.0"),
-                     "eventType": "", "eventName": "", "targetTypes": [], "description": w.get("alg_description", "")}
+                     "eventType": "", "eventName": "", "targetTypes": [], "description": w.get("status", "")}
                     for w in warehouses]
         return _ok({"device_id": device.device_id, "count": len(rows), "algorithms": rows})
 
