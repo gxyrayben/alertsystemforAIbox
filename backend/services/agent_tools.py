@@ -582,12 +582,15 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                     "message": f"智能体算法「{args['event_tag']}」已创建"})
 
     if name == "create_agent_task":
+        print(f"in create_agent_task")
         device = await _get_device(db, args.get("device_id", ""))
         if not device:
+            print(f"_get_device error ",args.get("device_id", ""))
             return _err("未找到设备，请先在『设备接入』添加并获取详情")
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             agent, err = await _find_agent(client, device, db, args["agent_id"])
             if err == "NOT_FOUND":
+                print(f"not _find_agent ",args["agent_id"])
                 return _err(f"设备上不存在智能体算法「{args['agent_id']}」。"
                             f"如需使用，请先确认是否新建该智能体算法（create_agent）。")
             if err:
@@ -596,7 +599,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 args["task_name"], int(args["channel_device_id"]), agent,
                 prompt=args.get("prompt"), alarm_condition=args.get("alarm_condition"),
                 analysis_interval=args.get("analysis_interval", 5))
-            print(f"build_agent_task_payload : payload",{payload});
+            print(f"build_agent_task_payload : payload",payload);
             data = await DeviceService.create_task(client, device, db, payload)
         if data is None:
             return _err(f"设备「{device.name}」离线或不可达，任务下发失败")

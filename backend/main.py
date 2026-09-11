@@ -83,6 +83,12 @@ async def lifespan(app: FastAPI):
         log_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(logs)"))).fetchall()]
         if "task_name" not in log_cols:
             await conn.execute(text("ALTER TABLE logs ADD COLUMN task_name TEXT DEFAULT ''"))
+        # 兼容旧库：feedback_tasks 早期列名为 channel，模型已改为 channelid（无则补列并迁移旧数据）
+        ft_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(feedback_tasks)"))).fetchall()]
+        if "channelid" not in ft_cols:
+            await conn.execute(text("ALTER TABLE feedback_tasks ADD COLUMN channelid TEXT DEFAULT ''"))
+            if "channel" in ft_cols:
+                await conn.execute(text("UPDATE feedback_tasks SET channelid = channel WHERE channelid IS NULL OR channelid = ''"))
         await conn.execute(text("PRAGMA journal_mode=WAL;"))
         await conn.execute(text("PRAGMA synchronous=NORMAL;"))
         await conn.execute(text("PRAGMA cache_size=-64000;"))

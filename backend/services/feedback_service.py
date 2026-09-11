@@ -148,7 +148,7 @@ async def get_feedback_task(db: AsyncSession, task_id: str) -> Optional[dict]:
         alerts = []
     return {
         "id": rec.id, "batch_id": rec.batch_id, "device_name": rec.device_name,
-        "task_name": rec.task_name, "channel": rec.channel, "category": rec.category,
+        "task_name": rec.task_name, "channelid": rec.channelid, "category": rec.category,
         "case_key": rec.case_key, "action": rec.action, "result": rec.result,
         "detail": rec.detail, "alert_count": rec.alert_count, "log_id": rec.log_id,
         "created_at": rec.created_at, "alerts": alerts,

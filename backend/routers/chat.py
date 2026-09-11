@@ -183,13 +183,13 @@ async def _run_agent(config, user_messages, db: AsyncSession, system_prompt: str
     for _ in range(5):
         #print(f"before chat_with_tools: {messages}")
         result = await llm_client.chat_with_tools(config, messages, TOOLS)
-        #print(f"after chat_with_tools: {result}")
+        print(f"after chat_with_tools: {result}")
         if "text" in result:           # if this is a result solution, return to userspace
             return result["text"], tables, proposal
 
         tc = result["tool_call"]       # else  ,need to call tools to get next data ;
         tool_result = await execute_tool(tc["name"], tc.get("arguments", {}), db)
-        #print(f"after execute_tool: {tool_result}")
+        print(f"after execute_tool: {tool_result}")
         table = _build_table(tc["name"], tool_result)
         if table:
             tables.append(table)

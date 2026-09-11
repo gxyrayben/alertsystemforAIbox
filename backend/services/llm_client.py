@@ -110,7 +110,7 @@ async def _openai_chat_with_tools(config: dict, messages: List[dict], tools: Lis
             json={"model": model, "messages": _to_openai_messages(messages),
                   "tools": oai_tools, "tool_choice": "auto"},
         )
-        #print(f"chat/completions resp: {resp.json()}")
+        print(f"chat/completions resp: {resp.json()}")
         resp.raise_for_status()
         msg = resp.json().get("choices", [{}])[0].get("message", {})
     if msg.get("tool_calls"):
