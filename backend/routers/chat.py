@@ -189,7 +189,7 @@ async def _run_agent(config, user_messages, db: AsyncSession, system_prompt: str
 
         tc = result["tool_call"]       # else  ,need to call tools to get next data ;
         tool_result = await execute_tool(tc["name"], tc.get("arguments", {}), db)
-        print(f"after execute_tool: {tool_result}")
+        #print(f"after execute_tool: {tool_result}")
         table = _build_table(tc["name"], tool_result)
         if table:
             tables.append(table)

@@ -34,7 +34,7 @@ def _apply_filters(query, device_name: Optional[str], channel: Optional[str], al
     if device_name:
         query = query.where(AlertORM.deviceName == device_name)
     if channel:
-        query = query.where(AlertORM.channel == channel)
+        query = query.where(AlertORM.channelid == channel)
     if alert_type:
         query = query.where(AlertORM.alertType == alert_type)
     return query
@@ -42,7 +42,7 @@ def _apply_filters(query, device_name: Optional[str], channel: Optional[str], al
 
 async def filter_options(db: AsyncSession, device_name: Optional[str] = None) -> dict:
     """返回筛选下拉项：通道列表 + 算法种类(alertType)列表（可按设备限定）。"""
-    ch_q = select(distinct(AlertORM.channel))
+    ch_q = select(distinct(AlertORM.channelid))
     ty_q = select(distinct(AlertORM.alertType))
     if device_name:
         ch_q = ch_q.where(AlertORM.deviceName == device_name)

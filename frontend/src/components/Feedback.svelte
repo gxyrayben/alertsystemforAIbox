@@ -175,7 +175,7 @@
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center justify-between">
                             <span class="text-[9px] bg-rose-500/20 text-rose-400 font-bold px-1.5 py-0.5 rounded border border-rose-500/30">待审核</span>
-                            <span class="text-[9px] text-slate-500 font-mono">{a.channel || '—'}</span>
+                            <span class="text-[9px] text-slate-500 font-mono">{a.channelid || '—'}</span>
                         </div>
                         <h4 class="text-[11px] font-bold text-slate-200 mt-1 truncate">{a.alertType}</h4>
                         <p class="text-[9px] text-slate-500 mt-0.5 truncate">{a.time}</p>
@@ -195,7 +195,7 @@
                         <h3 class="font-bold text-white mt-1.5 text-xs">{selected.deviceName} · {selected.alertType}</h3>
                     </div>
                     <div class="text-right">
-                        <p class="text-[10px] text-slate-500">通道 {selected.channel || '—'}</p>
+                        <p class="text-[10px] text-slate-500">通道 {selected.channelid || '—'}</p>
                         <p class="text-xs font-semibold text-indigo-400 font-mono">{selected.time}</p>
                         {#if selected.feedback_status}
                             {@const lb = statusLabel(selected.feedback_status)}
@@ -265,7 +265,7 @@
                             <span class="text-[9px] font-bold px-1.5 py-0.5 rounded border {lb.cls}">{lb.text}</span>
                         </div>
                         <h4 class="text-[11px] font-semibold text-slate-300 mt-1 truncate">{a.alertType}</h4>
-                        <p class="text-[9px] text-slate-500 mt-0.5 truncate">{a.channel || '—'} · 点击重新标注</p>
+                        <p class="text-[9px] text-slate-500 mt-0.5 truncate">{a.channelid || '—'} · 点击重新标注</p>
                     </div>
                 </div>
             {/each}
