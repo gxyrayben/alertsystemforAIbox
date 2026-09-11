@@ -472,20 +472,21 @@ class DeviceService:
     async def _fetch_channels(client: httpx.AsyncClient, base_url: str, ip: str) -> List[dict]:
         results = []
         try:
+            res1 = await client.post(f"{base_url}/device_access/device_state", json={"offset": 0, "size": 100}) 
+            print(f"evice_access/device_state {res1.json()}")
+            if res1.status_code == 200 and res1.json().get("code") == 0:
+                data_list = res1.json().get("data", []) or []
+                state_map = {str(item.get("device_id")): item.get("state") for item in data_list}
+            #print(f"state_map:{state_map}")
             res = await client.post(f"{base_url}/device_access/device_config", json={"offset": 0, "size": 100})
             if res.status_code == 200 and res.json().get("code") == 0:
                 items = res.json().get("data", [])
                 for item in items:
                     onlinestatus = "offline"
-                    device_id = str(item.get("device_id"))
-                    try:
-                        res1 = await client.post(f"{base_url}/device_access/device_state", json={"device_id": device_id})
-                        if res1.status_code == 200 and res1.json().get("code") == 0:
-                            if(res1.json().get("data", {}).get("state") == 0):
-                                onlinestatus = "online"
-                    except Exception as e:
-                        print(f"Failed to fetch state for channel {device_id}: {e}")
-
+                    device_id = item.get("device_id")
+                    status = state_map.get(str(device_id))  # 直接取值，未匹配到返回 None
+                    onlinestatus = "online" if status == 0 else "offline"
+                    #print(f"onlinestatus:{onlinestatus}")
                     results.append({
                         "device_id": device_id,
                         "device_name": item.get("device_name"),

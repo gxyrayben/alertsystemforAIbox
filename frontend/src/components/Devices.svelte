@@ -1,7 +1,7 @@
 <script>
     import { onMount } from 'svelte';
     import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api.js';
-    import { parseJson } from '../lib/utils.js';
+    import { parseJson, extractError } from '../lib/utils.js';
     import { setDevices } from '../lib/controlStore.js';
 
     let devices = [];
@@ -41,7 +41,8 @@
             isDeviceModalOpen = false;
         } catch (e) {
             console.error(e);
-            alert(`保存失败: ${e.detail || '未知错误'}`);
+            const action = editingDeviceId ? '保存' : '添加';
+            alert(`${action}设备失败：${extractError(e)}`);
         }
     }
 

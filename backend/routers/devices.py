@@ -5,6 +5,7 @@ import json
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 from models.db import get_db
 from models.schemas import Device, AgentCreate, AgentTaskDeploy
 from models.orm import DeviceORM
@@ -29,12 +30,24 @@ async def get_devices(db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=Device)
 async def create_device(device: Device, db: AsyncSession = Depends(get_db)):
     device_data = device.dict(exclude=_MANAGED_FIELDS)
+
+    # 插入前先查重：device_id 有唯一约束，重复会在 commit 时抛 IntegrityError（500）。
+    # 提前快速失败，返回可读的 409，同时省掉无谓的设备登录/快照拉取。
+    existing = await db.execute(select(DeviceORM).where(DeviceORM.device_id == device.device_id))
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail=f"设备业务 ID「{device.device_id}」已存在，请勿重复添加")
+
     snapshot = await DeviceService.fetch_device_data(device.ip, device.port, device.username, device.password)
 
     new_device = DeviceORM(id=f"dev-{uuid.uuid4()}", **device_data)
     apply_device_snapshot(new_device, *snapshot)
     db.add(new_device)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # 并发场景下仍可能漏过上面的查重，兜底回滚并返回友好提示，避免 500
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"设备业务 ID「{device.device_id}」已存在，请勿重复添加")
     await db.refresh(new_device)
     return new_device
 

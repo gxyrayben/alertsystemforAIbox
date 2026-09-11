@@ -596,6 +596,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 args["task_name"], int(args["channel_device_id"]), agent,
                 prompt=args.get("prompt"), alarm_condition=args.get("alarm_condition"),
                 analysis_interval=args.get("analysis_interval", 5))
+            print(f"build_agent_task_payload : payload",{payload});
             data = await DeviceService.create_task(client, device, db, payload)
         if data is None:
             return _err(f"设备「{device.name}」离线或不可达，任务下发失败")
