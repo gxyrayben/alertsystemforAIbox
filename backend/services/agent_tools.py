@@ -582,29 +582,70 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                     "message": f"智能体算法「{args['event_tag']}」已创建"})
 
     if name == "create_agent_task":
-        print(f"in create_agent_task")
         device = await _get_device(db, args.get("device_id", ""))
         if not device:
-            print(f"_get_device error ",args.get("device_id", ""))
             return _err("未找到设备，请先在『设备接入』添加并获取详情")
+        channel_id = int(args["channel_device_id"])
+        existing = None  # 命中的同通道现有大模型任务（若有）
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             agent, err = await _find_agent(client, device, db, args["agent_id"])
             if err == "NOT_FOUND":
-                print(f"not _find_agent ",args["agent_id"])
                 return _err(f"设备上不存在智能体算法「{args['agent_id']}」。"
                             f"如需使用，请先确认是否新建该智能体算法（create_agent）。")
             if err:
                 return _err(f"创建失败：{err}")
-            payload = tb.build_agent_task_payload(
-                args["task_name"], int(args["channel_device_id"]), agent,
-                prompt=args.get("prompt"), alarm_condition=args.get("alarm_condition"),
-                analysis_interval=args.get("analysis_interval", 5))
-            print(f"build_agent_task_payload : payload",payload);
-            data = await DeviceService.create_task(client, device, db, payload)
+
+            # 本次要挂载的智能体项（字段兜底沿用 build_agent_task_payload 的便捷入口口径）
+            new_item = {
+                "event_id": agent.get("event_id"),
+                "event_tag": agent.get("event_tag"),
+                "agent_config": tb.build_agent_config({
+                    **agent,
+                    "prompt": args.get("prompt") if args.get("prompt") is not None else agent.get("prompt", ""),
+                    "alarm_condition": args.get("alarm_condition"),
+                    "filter_enable": False, "filter_keywords": "",
+                }),
+            }
+
+            # 该通道是否已有大模型任务(agent_real_task)：有则追加智能体，无则新建
+            tasks_data = await DeviceService.get_device_tasks(client, device, db)
+            if tasks_data and tasks_data.get("code") == 0:
+                for t in tasks_data.get("data", {}).get("list", []):
+                    if t.get("task_type") != "agent_real_task":
+                        continue
+                    if any(int(d.get("device_id", -1)) == channel_id for d in t.get("device_list", [])):
+                        existing = t
+                        break
+
+            if existing:
+                cur = existing.get("agent_list", []) or []
+                # 幂等：同一智能体已在任务中，直接返回成功，不重复添加
+                if any(str(a.get("event_id")) == str(new_item["event_id"]) for a in cur):
+                    return _ok({"success": True, "task_id": existing.get("task_id"),
+                                "message": f"通道已在任务「{existing.get('task_name')}」中关联智能体"
+                                           f"「{agent.get('event_tag')}」，无需重复添加"})
+                # 上限保护：一个任务最多关联 4 个智能体算法
+                if len(cur) >= 4:
+                    return _err(f"任务「{existing.get('task_name')}」已关联 {len(cur)} 个智能体算法，"
+                                f"达上限 4，无法再新增。")
+                existing["agent_list"] = cur + [new_item]
+                payload = DeviceService.build_task_payload(existing)  # 白名单保留 task_id/task_name/agent_list…
+                data = await DeviceService.update_task(client, device, db, payload)
+            else:
+                payload = tb.build_agent_task_payload(
+                    args["task_name"], channel_id, agent,
+                    prompt=args.get("prompt"), alarm_condition=args.get("alarm_condition"),
+                    analysis_interval=args.get("analysis_interval", 5))
+                data = await DeviceService.create_task(client, device, db, payload)
+
         if data is None:
             return _err(f"设备「{device.name}」离线或不可达，任务下发失败")
         if data.get("code") != 0:
             return _err(f"任务下发失败：{data.get('message')}")
+        if existing:
+            return _ok({"success": True, "task_id": existing.get("task_id"),
+                        "message": f"智能体算法「{agent.get('event_tag')}」已追加至任务"
+                                   f"「{existing.get('task_name')}」（现关联 {len(existing['agent_list'])} 个）"})
         return _ok({"success": True, "task_id": data.get("data", {}).get("task_id"),
                     "message": f"纯大模型任务「{args['task_name']}」已下发"})
 

@@ -407,6 +407,21 @@ class DeviceService:
         return await DeviceService.authed_post(client, device, db, "/intelli_manager/task", body)
 
     @staticmethod
+    async def update_task(client, device, db, body: dict):
+        """更新已有布控任务（PUT /intelli_manager/task，body 需含 task_id）。
+        设备靠 body 里的 task_id 区分更新 vs 新建；参照 task_service 的 Prompt 优化下发用法。
+        成功返回接口 JSON（dict，含 code/message），网络/异常返回 None。"""
+        base_url = f"http://{device.ip}:{device.port}"
+        if device.session_id:
+            client.cookies.set("sessionID", device.session_id)
+        try:
+            res = await client.put(f"{base_url}/intelli_manager/task", json=body or {})
+            return res.json() if res.status_code == 200 else None
+        except Exception as e:
+            print(f"update_task error {device.ip}: {e}")
+            return None
+
+    @staticmethod
     async def create_monitor(client, device, db, body: dict):
         """算法仓任务第二步：下发 monitor（/intelli_manager/monitor）。"""
         return await DeviceService.authed_post(client, device, db, "/intelli_manager/monitor", body)
