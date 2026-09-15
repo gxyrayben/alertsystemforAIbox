@@ -85,6 +85,17 @@ _TABLE_SPECS = {
             {"key": "prompt_preview", "label": "提示词预览"},
         ],
     },
+    "list_task_templates": {
+        "data_key": "templates",
+        "title": "参数模板库",
+        "columns": [
+            {"key": "name", "label": "模板名称"},
+            {"key": "task_mode", "label": "任务类型"},
+            {"key": "event_type", "label": "事件类型"},
+            {"key": "description", "label": "说明"},
+            {"key": "id", "label": "模板ID"},
+        ],
+    },
 }
 
 
@@ -193,13 +204,13 @@ async def _run_agent(config, user_messages, db: AsyncSession, system_prompt: str
         table = _build_table(tc["name"], tool_result)
         if table:
             tables.append(table)
-        if tc["name"] == "propose_deployment":
-            try:
-                data = json.loads(tool_result)
-                if isinstance(data, dict) and data.get("proposal"):
-                    proposal = data["proposal"]
-            except Exception:
-                pass
+        # 布控方案抽取：任何工具结果含 proposal 键都采纳（propose_deployment / apply_task_template）
+        try:
+            data = json.loads(tool_result)
+            if isinstance(data, dict) and data.get("proposal"):
+                proposal = data["proposal"]
+        except Exception:
+            pass
         messages.append({"role": "assistant", "text": None, "tool_call": tc,
                          "tool_call_id": tc.get("tool_call_id", "call_0")})
         messages.append({"role": "tool_result", "text": tool_result,

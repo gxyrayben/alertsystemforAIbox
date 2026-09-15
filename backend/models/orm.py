@@ -53,6 +53,22 @@ class TaskORM(Base):
     created_at = Column(BigInteger, nullable=False)
     last_processed_time = Column(BigInteger, default=0)
 
+class TaskTemplateORM(Base):
+    """布控任务【参数模板】—— 面板参数快照，可保存 / 套用 / 被智能体引用。
+
+    config 为右侧控制面板 config 的 JSON 字符串快照（前端形状），套用时回填面板；
+    task_mode 与面板 taskMode 对齐（smallmodel / agent / combined），event_type 便于按场景归类与匹配报警大图。
+    """
+    __tablename__ = "task_templates"
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    task_mode = Column(String, default="smallmodel")
+    event_type = Column(String, default="")
+    config = Column(String, default="{}")  # 面板 config 快照（JSON 字符串）
+    description = Column(String, default="")
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, index=True, nullable=False)
+
 class LogORM(Base):
     __tablename__ = "logs"
     id = Column(String, primary_key=True, index=True)

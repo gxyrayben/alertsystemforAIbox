@@ -1,6 +1,6 @@
 <script>
     import { onMount, tick } from 'svelte';
-    import { tasksList, showToast, switchTab, chatRequest, selectedDevice } from '../lib/controlStore.js';
+    import { showToast, switchTab, chatRequest, selectedDevice } from '../lib/controlStore.js';
     import { apiPost, apiGet, apiDelete, API_BASE } from '../lib/api.js';
 
     const LS_CONV_KEY = 'aiChatConvId';
@@ -24,13 +24,18 @@
         intrusionDuration: 3, alarmInterval: 10,
         cropUp: 0.5, cropDown: 0.3, cropLeft: 0.4, cropRight: 0.6,
         maxTarget: 1.0, minTarget: 0.0, roiPoints: [],
+        event_type: '', algo_cabin_name: '',    // 算法标识（propose/对话填充；查看态无来源，靠 deploy() guard 拦截）
         // 智能体任务（agent_real_task）专用：
         taskMode: 'smallmodel',   // 'agent' | 'smallmodel' | 'combined'
         channel_device_id: null,
         device_id: null,
         agents: [],               // ≤4：{event_id,event_tag,alarm_type,prompt,alarm_condition,filter_enable,filter_keywords,roiId}
-        rois: [{ id: 'full', name: '全屏检测', points: [] }],
-        activeAgentIndex: 0
+        // 算法仓（小模型/小+大）任务：多算法项，每项自带参数 + 绑池 ROI（roiId），与 agents[] 镜像。
+        // Phase 1：由 propose/模板/查看归一化为【单项】；Phase 2 再加多槽编辑器。
+        algorithms: [],           // {kind,event_type,algo_cabin_name,version,useFullFrame,roiId, 各参数…}
+        rois: [{ id: 'full', name: '全屏检测', points: [] }],   // 任务级 ROI 池（两种模式共享）
+        activeAgentIndex: 0,
+        activeAlgorithmIndex: 0
     };
 
     let messages = [WELCOME];
@@ -43,6 +48,7 @@
     let chatInput = '';
     let chatImage = null;
     let config = { ...defaultConfig };
+    let templateApplied = false;   // true=当前面板参数来自「套用模板」(路径 b/c)，部署时跳过强制 ROI 门禁；手动配置为 false
     let monitorActive = false;
     let roiDrawActive = false;
     let sceneImage = null;   // 视频区载入的真实报警大图（绝对 URL），null 时回退占位图
@@ -56,10 +62,14 @@
     // convId 变化时持久化，刷新后可恢复到同一会话
     $: if (convId) localStorage.setItem(LS_CONV_KEY, convId);
 
-    // ── 智能体任务（agent_real_task）派生态 ──────────────────────────────
+    // ── 派生态：智能体任务 & 算法仓任务共享「池 + 逐项 ROI 绑定」模型 ────────
     $: isAgentTask = config.taskMode === 'agent';
     $: activeAgent = (config.agents || [])[config.activeAgentIndex] || null;
-    $: activeRoi = (config.rois || []).find((r) => r.id === activeAgent?.roiId) || (config.rois || [])[0] || { points: [] };
+    // 算法仓任务的当前编辑算法项（与 activeAgent 镜像；Phase 1 恒为第 0 项）
+    $: activeAlgorithm = (config.algorithms || [])[config.activeAlgorithmIndex] || null;
+    // ROI 绘制/绑定的作用对象：大模型任务=当前智能体，算法仓任务=当前算法项
+    $: activeItem = isAgentTask ? activeAgent : activeAlgorithm;
+    $: activeRoi = (config.rois || []).find((r) => r.id === activeItem?.roiId) || (config.rois || [])[0] || { points: [] };
 
     const presets = [
         { icon: '📹', text: '当前设备接入了多少个视频流？请用表格列出所有通道。' },
@@ -105,6 +115,7 @@
         convId = null;
         localStorage.removeItem(LS_CONV_KEY);
         config = { ...defaultConfig };
+        templateApplied = false;
         monitorActive = false;
         roiDrawActive = false;
         sceneImage = null;
@@ -164,52 +175,50 @@
     }
 
     // 在报警大图上点击落点，构成检测区(ROI)多边形；坐标归一化到 0~1。
-    // 智能体任务：写入当前活动 agent 绑定的 ROI（若绑的是全屏，则先新建一个检测区并改绑）；
-    // 小模型/小+大任务：沿用单一 config.roiPoints。
+    // 两种任务共用一条代码路径：写入【当前活动项 activeItem】(大模型=当前智能体 / 算法仓=当前算法)
+    // 绑定的池 ROI；若当前绑的是全屏，则先新建一个「检测区N」池项并把 activeItem 改绑到它。
     function addRoiPoint(ev) {
-        if (!roiDrawActive || !roiSvgRef) return;
+        if (!roiDrawActive || !roiSvgRef || !activeItem) return;
         const rect = roiSvgRef.getBoundingClientRect();
         const x = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
         const y = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
         const pt = { x: +x.toFixed(4), y: +y.toFixed(4) };
-        if (isAgentTask) {
-            if (!activeAgent) return;
-            let roiId = activeAgent.roiId;
-            if (roiId === 'full') {
-                // 从全屏切到自定义检测区：新建区域并把当前 agent 改绑到它
-                const n = config.rois.filter((r) => r.id !== 'full').length + 1;
-                roiId = 'roi_' + Date.now();
-                config.rois = [...config.rois, { id: roiId, name: `检测区${n}`, points: [] }];
-                activeAgent.roiId = roiId;
-                config.agents = [...config.agents];
-            }
-            config.rois = config.rois.map((r) => r.id === roiId ? { ...r, points: [...r.points, pt] } : r);
-        } else {
-            config.roiPoints = [...config.roiPoints, pt];
+        let roiId = activeItem.roiId;
+        if (roiId === 'full') {
+            // 从全屏切到自定义检测区：新建区域并把当前项改绑到它
+            const n = config.rois.filter((r) => r.id !== 'full').length + 1;
+            roiId = 'roi_' + Date.now();
+            config.rois = [...config.rois, { id: roiId, name: `检测区${n}`, points: [] }];
+            activeItem.roiId = roiId;
+            if (!isAgentTask) activeItem.useFullFrame = false;  // 画了自定义区即取消「全屏」标记（仅算法仓项有此字段）
+            syncActiveItem();
         }
+        config.rois = config.rois.map((r) => r.id === roiId ? { ...r, points: [...r.points, pt] } : r);
+    }
+
+    // 把当前活动项(activeItem)写回其所属数组，触发 Svelte 响应式刷新（两模式各自的数组）
+    function syncActiveItem() {
+        if (isAgentTask) config.agents = [...config.agents];
+        else config.algorithms = [...config.algorithms];
     }
 
     function clearRoi() {
-        if (isAgentTask) {
-            if (!activeAgent) return;
-            const roiId = activeAgent.roiId;
-            if (roiId === 'full') {
-                showToast('全屏检测无需清除。请先选择/绘制自定义检测区。', 'info');
-                return;
-            }
-            // 移除该自定义检测区并把当前 agent 回落到全屏
-            config.rois = config.rois.filter((r) => r.id !== roiId);
-            activeAgent.roiId = 'full';
-            config.agents = [...config.agents];
-            showToast('已清除该智能体的检测区，已回落为全屏检测。', 'info');
-        } else {
-            config.roiPoints = [];
-            showToast('已清除检测区，可重新绘制。', 'info');
+        if (!activeItem) return;
+        const roiId = activeItem.roiId;
+        if (roiId === 'full') {
+            showToast('全屏检测无需清除。请先选择/绘制自定义检测区。', 'info');
+            return;
         }
+        // 移除该自定义检测区并把当前项回落到全屏
+        config.rois = config.rois.filter((r) => r.id !== roiId);
+        activeItem.roiId = 'full';
+        if (!isAgentTask) activeItem.useFullFrame = false;
+        syncActiveItem();
+        showToast(isAgentTask ? '已清除该智能体的检测区，已回落为全屏检测。' : '已清除该算法的检测区，已回落为全屏检测。', 'info');
     }
 
-    // roiPoints -> SVG points 字符串（viewBox 800x500）：智能体任务取当前活动 ROI，否则取单一 roiPoints
-    $: currentRoiPoints = (isAgentTask ? activeRoi?.points : config.roiPoints) || [];
+    // roiPoints -> SVG points 字符串（viewBox 800x500）：取当前活动项绑定的池 ROI
+    $: currentRoiPoints = (activeRoi?.points) || [];
     $: roiSvgPoints = currentRoiPoints.map((p) => `${p.x * 800},${p.y * 500}`).join(' ');
 
     // 切换当前编辑的智能体
@@ -217,11 +226,20 @@
         config.activeAgentIndex = i;
     }
 
-    // 当前 agent 绑定某个 ROI（列表单选：改绑即切换）
+    // 当前活动项绑定某个 ROI（列表单选：改绑即切换）
     function bindRoi(roiId) {
-        if (!activeAgent) return;
-        activeAgent.roiId = roiId;
-        config.agents = [...config.agents];
+        if (!activeItem) return;
+        activeItem.roiId = roiId;
+        if (!isAgentTask) activeItem.useFullFrame = (roiId === 'full');  // 绑到 full 即显式选择全屏
+        syncActiveItem();
+    }
+
+    // 算法仓任务：切「本算法使用全屏检测」——勾选即回落到 'full' 池项并置标记（供门禁放行）
+    function toggleActiveFullFrame(checked) {
+        if (!activeAlgorithm) return;
+        activeAlgorithm.useFullFrame = checked;
+        if (checked) activeAlgorithm.roiId = 'full';
+        config.algorithms = [...config.algorithms];
     }
 
     // 新增一个智能体槽位（≤4），默认取第一个未被占用的可选智能体
@@ -329,9 +347,61 @@
 
     function applyConfig(data) {
         config = { ...config, ...data };
+        templateApplied = false;
         monitorActive = true;
         showToast('双级级联配置参数填充，裁切扩图区域渲染成功！', 'success');
         scrollToBottom();
+    }
+
+    // 面板三列参数（Phase 1 绑顶层 config）对应的键：多算法回填时把当前算法项的这些参数提到顶层，
+    // 使单算法面板显示/编辑的是「当前算法」的真实值（下发时当前项也回读顶层，保持一致）。
+    const PANEL_PARAM_KEYS = ['maxTarget', 'minTarget', 'yoloHumanThresh', 'yoloVehicleThresh',
+        'yoloNonMotorThresh', 'yoloTarget', 'intrusionDuration', 'alarmInterval',
+        'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'prompt', 'agentType'];
+    function hoistItemParams(item) {
+        const out = {};
+        for (const k of PANEL_PARAM_KEYS) if (item && item[k] !== undefined) out[k] = item[k];
+        return out;
+    }
+
+    // 把「算法仓任务」来源(d) 归一化为面板可用的 {algorithms[], rois[] 池, activeAlgorithmIndex}：
+    // - d.algorithms 存在（后端 detail 烘焙的多算法逆映射 / 新模板）→ 采用其池与算法项，并把当前算法参数提到顶层供面板；
+    // - 旧单算法快照/模板（仅 event_type/algo_cabin_name/roiPoints/顶层阈值）→ 归一化为【单项】algorithms[] + 池。
+    // 顶层参数键保留（Phase 1 三列面板仍绑顶层）；下发时当前项读顶层、其余项读各自 item（多算法原样 round-trip）。
+    function normalizeWarehouseConfig(base, d) {
+        if (Array.isArray(d.algorithms) && d.algorithms.length) {
+            const rois = (Array.isArray(d.rois) && d.rois.length) ? d.rois : [{ id: 'full', name: '全屏检测', points: [] }];
+            const idx = d.activeAlgorithmIndex || 0;
+            const active = d.algorithms[idx] || d.algorithms[0];
+            return {
+                ...base, ...d, ...hoistItemParams(active),
+                algorithms: d.algorithms, rois,
+                activeAlgorithmIndex: idx, roiPoints: []
+            };
+        }
+        // 旧单算法：由 event_type/algo_cabin_name/roiPoints(顶层) 组装一条 algorithms[] + 一个池 ROI
+        const pts = d.roiPoints || base.roiPoints || [];
+        const rois = [{ id: 'full', name: '全屏检测', points: [] }];
+        let roiId = 'full';
+        let useFullFrame = false;
+        if (pts.length >= 3) { roiId = 'roi_1'; rois.push({ id: roiId, name: '检测区1', points: pts }); }
+        const kind = (d.taskMode === 'combined') ? 'combined' : 'small';
+        const item = {
+            kind,
+            event_type: d.event_type || base.event_type || '',
+            algo_cabin_name: d.algo_cabin_name || base.algo_cabin_name || '',
+            version: d.version || 'V2.0.0',
+            roiId, useFullFrame
+        };
+        if (kind === 'combined') {
+            item.agent_id = d.agent_id || d.agentType || '';
+            item.event_tag = d.event_tag || d.agentType || '';
+        }
+        return {
+            ...base, ...d,
+            algorithms: [item], rois,
+            activeAlgorithmIndex: 0, roiPoints: pts
+        };
     }
 
     // 智能体返回布控方案：填充推荐参数 -> 载入真实报警大图 -> 激活监视 + 开启 ROI 绘制
@@ -347,8 +417,10 @@
             availableAgents = proposal.available_agents || [];
             if (!availableAgents.length) await loadAvailableAgents();
         } else {
-            config = { ...config, ...proposal, roiPoints: [] };
+            config = normalizeWarehouseConfig(config, proposal);
         }
+        // fromTemplate=对话选模板(路径 c)：免 ROI 门禁；普通 propose 草案：需画 ROI 才放行
+        templateApplied = !!proposal.fromTemplate;
         monitorActive = true;
         await loadSceneImage(proposal.alertType);
         roiDrawActive = true;
@@ -369,11 +441,13 @@
             };
             await loadAvailableAgents();  // 拉可选智能体，便于下拉换绑
         } else {
-            config = { ...defaultConfig, ...d, roiPoints: d.roiPoints || [] };
+            config = normalizeWarehouseConfig(defaultConfig, d);
         }
+        // 查看态非模板；真实 ROI 已随算法项带回（全屏项 useFullFrame=true / 自定义项有点），门禁自然放行
+        templateApplied = false;
         monitorActive = true;
         await loadSceneImage(d.alertType);
-        roiDrawActive = !(d.taskMode === 'agent') && !(d.roiPoints && d.roiPoints.length);
+        roiDrawActive = !(d.taskMode === 'agent');
         pushSystemTip(d.name || row.task_name || '布控任务');
         showToast(`已载入任务「${d.name || row.task_name || row.task_id}」的真实参数。`, 'success');
         await scrollToBottom();
@@ -442,12 +516,93 @@
             await deployAgentTask();
             return;
         }
-        // 小模型 / 小+大任务：暂仍为本地登记（后续按类型单独接入真实下发）
-        const newId = 'TSK-' + Math.floor(Math.random() * 900 + 100);
-        const newTask = { id: newId, status: 'active', todayAlerts: 0, ...config, device: $selectedDevice?.name || config.device };
-        tasksList.update((list) => [newTask, ...list]);
-        showToast(`🚀 级联布控任务 [${newTask.name}] 成功分发并编译至边端芯片中！`, 'success');
-        setTimeout(() => switchTab('taskops'), 1000);
+        // 强制 ROI 门禁（仅手动路径 templateApplied=false）：每条仓算法必须「画了 ≥3 点的检测区」或「显式勾选使用全屏」，
+        // 纯默认(roiId='full' 且未勾全屏)不放行。模板/对话路径(templateApplied=true)跳过此门禁，用模板自带 ROI 或全屏。
+        if (!templateApplied) {
+            const algos = config.algorithms || [];
+            const blocked = algos.some((item) => {
+                if (item.useFullFrame) return false;
+                const pts = (config.rois.find((r) => r.id === item.roiId)?.points) || [];
+                return pts.length < 3;
+            });
+            if (!algos.length || blocked) {
+                showToast('请先为每个算法绘制检测区(ROI)或勾选使用全屏，再部署。', 'warning');
+                return;
+            }
+        }
+        await deployWarehouseTaskMulti();
+    }
+
+    // 算法仓多算法真实下发：把 config.algorithms[] 映射成 WarehouseTaskDeploy.algorithms[]，一次提交 N 条算法。
+    // Phase 1 三列面板仍绑顶层 config.*，故【激活项】参数读 config.*（面板编辑落点），其余项读各自 item.*（回填带回的值）。
+    // 逐项 ROI：勾选全屏→空点(设备侧全画面)；否则按 item.roiId 从共享池 config.rois 解析（同 deployAgentTask）。
+    async function deployWarehouseTaskMulti() {
+        const device = $selectedDevice;
+        if (!device?.id) { showToast('请先在顶栏选择一个设备。', 'error'); return; }
+        const channelId = config.channel_device_id;
+        if (channelId === null || channelId === undefined || channelId === '') {
+            showToast('缺少目标视频流通道(channel_device_id)，请先通过对话生成布控方案。', 'warning');
+            return;
+        }
+        const activeIdx = config.activeAlgorithmIndex || 0;
+        const items = (config.algorithms || []).map((item, i) => {
+            const p = (i === activeIdx) ? config : item;   // 激活项读顶层面板值，其余项读各自 item
+            // 三阈值 → 设备单阈值：按「前置检测目标」取对应阈值；目标类型对齐后端 _target_type_to_yolo。
+            const yoloTarget = p.yoloTarget ?? config.yoloTarget;
+            const threshold = yoloTarget === 'vehicle' ? p.yoloVehicleThresh
+                : yoloTarget === 'human' ? p.yoloHumanThresh
+                : p.yoloNonMotorThresh;
+            const target_types = yoloTarget === 'vehicle' ? ['VEHICLE'] : ['PERSON'];
+            const roiPoints = item.useFullFrame ? [] : ((config.rois.find((r) => r.id === item.roiId)?.points) || []);
+            const kind = item.kind || 'small';
+            const algo = {
+                kind,
+                event_type: item.event_type || config.event_type,
+                algo_cabin_name: item.algo_cabin_name || config.algo_cabin_name,
+                version: item.version || config.version || 'V2.0.0',
+                target_types,
+                threshold: Number(threshold),
+                // 面板「最大/最小目标限制」是 0~1 滑杆，设备 targetMax/targetMin 为整数目标数，取整下发。
+                target_max: Math.round(Number(p.maxTarget)),
+                target_min: Math.round(Number(p.minTarget)),
+                duration: Math.round(Number(p.intrusionDuration)),
+                cooldown: Math.round(Number(p.alarmInterval)),
+                roiPoints
+            };
+            if (kind === 'combined') {
+                // 小+大：追加扩图策略（target_expand 仅小+大生效）+ 二次大模型智能体标识
+                algo.target_expand = {
+                    top: Number(p.cropUp), bottom: Number(p.cropDown),
+                    left: Number(p.cropLeft), right: Number(p.cropRight)
+                };
+                algo.agent_id = p.agentType || item.agent_id;
+                algo.event_tag = (i === activeIdx) ? (config.agentType || '') : (item.event_tag || item.agentType || '');
+                algo.prompt = p.prompt || '';
+                algo.alarm_condition = null;
+            }
+            return algo;
+        });
+        if (!items.length) {
+            showToast('尚未配置任何算法，请先通过对话生成布控方案或添加算法。', 'warning');
+            return;
+        }
+        if (items.some((a) => !a.event_type || !a.algo_cabin_name)) {
+            showToast('缺少算法标识(event_type / algo_cabin_name)，请先通过对话生成布控方案后再部署。', 'warning');
+            return;
+        }
+        const body = {
+            channel_device_id: Number(channelId),
+            task_name: config.name,
+            algorithms: items
+        };
+        try {
+            const res = await apiPost(`/devices/${device.id}/deploy/warehouse-task`, body);
+            const hasCombined = items.some((a) => a.kind === 'combined');
+            showToast(`🚀 ${hasCombined ? '小+大级联' : '纯小模型'}布控任务「${config.name}」已下发（${items.length} 个算法，task_id=${res.task_id}）。`, 'success');
+            setTimeout(() => switchTab('taskops'), 1000);
+        } catch (e) {
+            showToast(e?.detail || '布控任务下发失败，请检查设备在线状态与算法授权。', 'error');
+        }
     }
 
     // 智能体任务真实下发：组装 AgentTaskDeploy 调 /devices/{id}/deploy/agent-task
@@ -487,6 +642,77 @@
         }
     }
 
+    // ---- 参数模板库：保存当前面板参数为模板 / 套用已存模板（灌面板，确认后再部署）----
+    let templates = [];            // 后端 /task-templates 列表
+    let selectedTemplateId = '';   // 下拉当前选中
+    let savingTemplate = false;
+
+    async function loadTemplates() {
+        try {
+            templates = await apiGet('/task-templates');
+        } catch (e) {
+            console.error('加载参数模板失败', e);
+        }
+    }
+
+    // 保存整份面板 config 快照为模板；task_mode/event_type 便于列表分类与场景匹配
+    async function saveAsTemplate() {
+        if (!monitorActive) {
+            showToast('请先生成或套用一份布控参数后再保存为模板。', 'warning');
+            return;
+        }
+        const input = window.prompt('为该参数模板命名：', config.name || '');
+        if (input === null) return;                 // 用户取消
+        const name = input.trim();
+        if (!name) { showToast('模板名称不能为空。', 'warning'); return; }
+        savingTemplate = true;
+        try {
+            await apiPost('/task-templates', {
+                name,
+                task_mode: config.taskMode || 'smallmodel',
+                event_type: config.alertType || config.event_type || '',
+                config,                              // 整份面板快照（含 taskMode/阈值/扩图/ROI 等）
+                description: ''
+            });
+            showToast(`已保存参数模板「${name}」。`, 'success');
+            await loadTemplates();
+        } catch (e) {
+            showToast(e?.detail || '保存模板失败，请重试。', 'error');
+        } finally {
+            savingTemplate = false;
+        }
+    }
+
+    // 套用模板：把 tpl.config 灌进面板（agent 铺 agents/rois 结构；仓任务经归一化器兼容旧单算法快照），
+    // 不自动下发——用户确认参数后再点部署。模板路径 templateApplied=true ⇒ 部署跳过强制 ROI 门禁（用模板自带 ROI 或全屏）。
+    async function applyTemplate(tpl) {
+        if (!tpl) return;
+        const d = tpl.config || {};
+        if (d.taskMode === 'agent') {
+            config = {
+                ...defaultConfig, ...d,
+                agents: d.agents && d.agents.length ? d.agents : [],
+                rois: d.rois && d.rois.length ? d.rois : [{ id: 'full', name: '全屏检测', points: [] }],
+                activeAgentIndex: 0
+            };
+            await loadAvailableAgents();
+        } else {
+            config = normalizeWarehouseConfig(defaultConfig, d);
+        }
+        templateApplied = true;   // 路径(b) 面板选模板：跳过强制 ROI 门禁
+        monitorActive = true;
+        await loadSceneImage(d.alertType);
+        roiDrawActive = !(d.taskMode === 'agent');   // 仓任务仍开绘制，允许用户按需重画 ROI（非强制）
+        showToast(`已套用参数模板「${tpl.name}」，可直接部署（如需可重新绘制检测区(ROI)）。`, 'success');
+    }
+
+    function onSelectTemplate(e) {
+        const id = e.target.value;
+        if (!id) return;
+        applyTemplate(templates.find((t) => t.id === id));
+        selectedTemplateId = '';   // 复位为占位项：下拉作「套用」动作菜单，可重复套用同一模板
+    }
+
     function handleEnter(e) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -500,6 +726,7 @@
         (async () => {
             await loadSkills();
             await loadConversations();
+            await loadTemplates();
             const saved = localStorage.getItem(LS_CONV_KEY);
             if (saved && conversations.some((c) => c.id === saved)) {
                 await openConversation(saved);
@@ -513,10 +740,16 @@
                 pushSystemTip(req.payload.name);
                 showToast(`已进入 [${req.payload.name}] 的级联协同调整环境。`, 'info');
             } else if (req.type === 'useTemplate') {
-                resetChat();
-                chatInput = `请为我配置【${req.payload}】。检测到目标后裁剪图片送智能体进行高精度判定。`;
-                sendMessage();
-                showToast(`已套用高敏级联模板: [${req.payload}]。请在右侧控制仓调阅细节。`, 'success');
+                if (req.payload && typeof req.payload === 'object') {
+                    // 对象负载：直接把模板参数灌进面板（参数模板库跨标签套用；tpl={name,config,...}）
+                    applyTemplate(req.payload);
+                } else {
+                    // 字符串负载：保留 AgentLibrary 现有行为（转成对话指令发送）
+                    resetChat();
+                    chatInput = `请为我配置【${req.payload}】。检测到目标后裁剪图片送智能体进行高精度判定。`;
+                    sendMessage();
+                    showToast(`已套用高敏级联模板: [${req.payload}]。请在右侧控制仓调阅细节。`, 'success');
+                }
             }
         });
         return unsub;
@@ -717,11 +950,25 @@
                     <span class="flow-arrow text-purple-400 font-bold">4. VLM Agent 深度识别</span>
                 </div>
             </div>
-            {#if monitorActive}
-                <button on:click={deploy} class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center transition-all shadow-md shadow-indigo-500/25 shrink-0">
-                    <i class="fa-solid fa-rocket mr-2 animate-bounce"></i>{isAgentTask ? '一键部署智能体任务' : '一键部署双级任务'}
-                </button>
-            {/if}
+            <div class="flex items-center gap-2 shrink-0">
+                <!-- 参数模板库：套用（下拉）/ 保存当前面板参数 -->
+                <select on:change={onSelectTemplate} bind:value={selectedTemplateId} title="套用参数模板"
+                        class="bg-slate-900 border border-slate-700 text-slate-300 text-[11px] rounded-lg px-2 py-2 max-w-[150px] focus:border-indigo-500 focus:outline-none">
+                    <option value="">🗂️ 套用模板…</option>
+                    {#each templates as t (t.id)}
+                        <option value={t.id}>{t.name}</option>
+                    {/each}
+                </select>
+                {#if monitorActive}
+                    <button on:click={saveAsTemplate} disabled={savingTemplate} title="把当前面板参数保存为模板"
+                            class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center transition-all border border-slate-700 shrink-0 disabled:opacity-50">
+                        <i class="fa-solid fa-bookmark mr-1.5"></i>保存为模板
+                    </button>
+                    <button on:click={deploy} class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center transition-all shadow-md shadow-indigo-500/25 shrink-0">
+                        <i class="fa-solid fa-rocket mr-2 animate-bounce"></i>{isAgentTask ? '一键部署智能体任务' : '一键部署双级任务'}
+                    </button>
+                {/if}
+            </div>
         </div>
 
         <div class="flex flex-col gap-5 items-stretch">
@@ -767,7 +1014,7 @@
                             </svg>
                             {#if roiDrawActive}
                                 <div class="absolute top-2 left-2 bg-indigo-600/90 text-white text-[10px] font-bold px-2 py-1 rounded shadow">
-                                    <i class="fa-solid fa-draw-polygon mr-1"></i>点击画点绘制检测区（已 {currentRoiPoints.length} 点）{#if isAgentTask && activeAgent}· 当前：{activeAgent.event_tag || '智能体'}{/if}
+                                    <i class="fa-solid fa-draw-polygon mr-1"></i>点击画点绘制检测区（已 {currentRoiPoints.length} 点）{#if isAgentTask && activeAgent}· 当前：{activeAgent.event_tag || '智能体'}{:else if !isAgentTask && activeAlgorithm}· 当前：{activeAlgorithm.event_type || '算法'}{/if}
                                 </div>
                             {/if}
                             {#if !isAgentTask}
@@ -797,6 +1044,33 @@
                             {/each}
                         </div>
                         <p class="text-[9px] text-slate-500 mt-2 leading-relaxed">先在上方选中一个智能体，再点「画制检测区」在画面上绘制；绘制后会自动新增一项并绑定到当前智能体。</p>
+                    </div>
+                {/if}
+
+                {#if monitorActive && !isAgentTask}
+                    <!-- 算法仓任务：检测区(ROI)列表 + 「本算法使用全屏检测」勾选。每条算法单选绑定一个 ROI；池全局共享。 -->
+                    <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
+                        <div class="flex items-center justify-between mb-3 pb-2 border-b border-slate-800">
+                            <span class="font-bold text-xs text-slate-200 flex items-center"><i class="fa-solid fa-object-group mr-1.5 text-indigo-400"></i>检测区(ROI)列表 · 关联算法：<span class="text-indigo-300 ml-1">{activeAlgorithm?.event_type || '（当前算法）'}</span></span>
+                            <label class="flex items-center space-x-1.5 cursor-pointer text-[10px] text-slate-300">
+                                <input type="checkbox" checked={!!activeAlgorithm?.useFullFrame} on:change={(e) => toggleActiveFullFrame(e.target.checked)} disabled={!activeAlgorithm}
+                                       class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-700 rounded cursor-pointer" />
+                                <span>本算法使用全屏检测</span>
+                            </label>
+                        </div>
+                        <div class="space-y-1.5">
+                            {#each config.rois as roi (roi.id)}
+                                <label class="flex items-center justify-between px-3 py-2 rounded-lg border cursor-pointer transition-colors {activeAlgorithm?.roiId === roi.id ? 'bg-indigo-600/15 border-indigo-500/40' : 'bg-slate-900 border-slate-800 hover:border-indigo-500/30'}">
+                                    <div class="flex items-center space-x-2.5">
+                                        <input type="radio" checked={activeAlgorithm?.roiId === roi.id} on:change={() => bindRoi(roi.id)} disabled={!activeAlgorithm}
+                                               class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-700 cursor-pointer" />
+                                        <span class="text-[11px] text-slate-200 font-medium">{roi.name}</span>
+                                    </div>
+                                    <span class="text-[9px] text-slate-500 font-mono">{roi.id === 'full' ? '全画面' : `${roi.points.length} 点`}</span>
+                                </label>
+                            {/each}
+                        </div>
+                        <p class="text-[9px] text-slate-500 mt-2 leading-relaxed">手动配置需为当前算法「画制检测区」或勾选「本算法使用全屏检测」后方可部署；套用模板则跳过此限制。</p>
                     </div>
                 {/if}
 
@@ -855,6 +1129,17 @@
                                     <label class="block text-[10px] text-slate-400 mb-1">分析间隔（单位:秒，默认 5）</label>
                                     <input type="number" min="1" bind:value={config.interval} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px] font-mono text-center" />
                                 </div>
+                            </div>
+                        </div>
+                    {:else}
+                        <!-- 全局任务参数（小模型 / 小+大任务）：仅任务名称；小模型/小+大为实时分析，无分析间隔/抽帧间隔 -->
+                        <div class="bg-indigo-950/20 border border-indigo-500/20 rounded-xl p-3.5 mb-4">
+                            <div class="flex items-center mb-2.5">
+                                <span class="font-extrabold text-indigo-300 flex items-center text-[11px]"><i class="fa-solid fa-gears mr-1.5"></i>全局任务参数（级联管道）</span>
+                            </div>
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-1">任务名称（模型自动生成，可修改）</label>
+                                <input type="text" bind:value={config.name} placeholder="自动计算生成" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]" />
                             </div>
                         </div>
                     {/if}

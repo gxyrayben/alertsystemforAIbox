@@ -14,7 +14,7 @@ from sqlalchemy.future import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from routers import devices, alerts, network, services, chat, llm, tasks, logs, conversations, feedback
+from routers import devices, alerts, network, services, chat, llm, tasks, logs, conversations, feedback, task_templates
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
 from services import alarm_services
@@ -131,6 +131,7 @@ app.include_router(tasks.router)
 app.include_router(logs.router)
 app.include_router(conversations.router)
 app.include_router(feedback.router)
+app.include_router(task_templates.router)
 
 if __name__ == "__main__":
     import uvicorn

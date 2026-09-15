@@ -50,6 +50,7 @@ SKILLS = [
             "check_algorithm_authorization", "list_device_algorithms", "resolve_algorithm", "list_agents",
             "create_agent", "propose_deployment",
             "create_smallmodel_task", "create_agent_task", "create_combined_task",
+            "update_device_task", "add_task_algorithm", "remove_task_algorithm",
         ],
         "preset": "我想在当前设备上新建一个布控任务，请先帮我做依赖校验并生成一份布控方案预览。",
         "guidance": (
@@ -76,7 +77,40 @@ SKILLS = [
             "- 【创建成功后必做】任一创建工具（create_smallmodel_task / create_agent_task / create_combined_task）"
             "返回 success 后，必须紧接着调用 get_device_control_tasks 重新拉取该设备的全部布控任务，"
             "让系统把最新任务列表以表格形式展示给用户；随后用一句话确认『任务已创建，当前设备共 N 个布控任务』。"
-            "追加智能体到已有任务的情况同样适用（复查以体现该任务已多关联一个智能体）。"
+            "追加智能体到已有任务的情况同样适用（复查以体现该任务已多关联一个智能体）。\n"
+            "- 【修改已下发任务的某个算法参数】用户想调整某个【已布控】任务里【某一个算法】的阈值/目标数/持续时长/"
+            "报警间隔/检测目标/ROI/扩图/二次大模型提示词时，用 update_device_task（传 task_id + 仅需修改的项），"
+            "底层对该任务的 monitor 以相同 id 覆盖下发。\n"
+            "- 【同一任务多算法·增删改查】同一个任务、同一类型可以布控多个算法，支持增删改查：\n"
+            "   · 算法身份：小模型/小+大 = 算法仓 algo_cabin_name + 事件类型 event_type；纯大模型 = 智能体(agent_id)。\n"
+            "   · 查：get_device_control_tasks 返回的任务明细已按『算法仓/规则』或『智能体列表』展开每个算法。\n"
+            "   · 增：add_task_algorithm（往已有任务加一个算法；小模型/小+大传 event_type+algo_cabin_name，"
+            "纯大模型传 agent_id），同任务已有算法保留。\n"
+            "   · 改：update_device_task；任务含多个算法时用 algo_cabin_name+event_type 定位要改的那个，其它算法不受影响；"
+            "单算法任务可不填定位项。\n"
+            "   · 删：remove_task_algorithm（按 event_type / agent_id 删一个算法）。注意设备暂无硬删除接口，"
+            "【删除】统一降级为【停用】(enable=False，可再启用/覆盖恢复)：删到某算法仓为空则停用该仓；"
+            "删除最后一个算法、或不指定任何算法标识（=清除整个任务）则停用整个任务(PUT enable=False)；硬删除后续再做。\n"
+            "- 上述增删改仅针对有 monitor 的小模型/小+大按算法仓+规则操作，纯大模型按智能体列表操作；抽帧间隔不在此范围。"
+            "改/增/删完照例调 get_device_control_tasks 复查最新算法清单。"
+        ),
+    },
+    {
+        "id": "task_templates",
+        "name": "参数模板库",
+        "icon": "🗂️",
+        "description": "复用已保存的布控参数模板：列出模板、把模板参数一键套用到控制面板，确认后即可部署，免去重复调参。",
+        "tools": ["list_task_templates", "apply_task_template"],
+        "preset": "帮我列出参数模板库里有哪些布控模板。",
+        "guidance": (
+            "【技能④·参数模板库】把常用布控参数（阈值/目标数/时长/报警间隔/扩图/检测目标等）存成模板，随用随取：\n"
+            "- 用户问『有哪些模板』『用/套用某个模板』时，先用 list_task_templates 列出（可按 task_mode 过滤），"
+            "让用户确认要套用哪一个；仅凭模板名不确定时先列出再匹配。\n"
+            "- 确定后用 apply_task_template（传 template_id；可选 device_id/channel_device_id/task_name），"
+            "系统会把模板参数填充到右侧『AI级联提取与细化控制面板』并载入该设备最新报警大图供画 ROI。\n"
+            "- 【重要】套用【不会自动下发】：套用只是把参数灌到界面，需用户确认参数、绘制检测区(ROI)后，"
+            "再用技能③的 create_smallmodel_task / create_agent_task / create_combined_task 真正下发到设备。\n"
+            "- 套用后若用户要求微调某项参数，直接在对话里说明即可，系统会更新面板对应项。"
         ),
     },
 ]

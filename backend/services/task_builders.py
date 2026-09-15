@@ -60,7 +60,7 @@ def build_agent_real_task_payload(
 
     agents 为已富化的智能体项列表，每项需含 event_id / event_tag，其余字段（prompt /
     alarm_condition / alarm_type / filter_enable / filter_keywords / area）交给 build_agent_config 兜底。
-    analysis_interval 为【任务级】全局分析间隔（秒）。
+    analysis_interval 为【任务级】全局分析间隔（秒），仅智能体任务有此概念。
     """
     agent_list = [
         {
@@ -132,6 +132,98 @@ def build_single_point_task_payload(
     }
 
 
+def build_rule(
+    event_type: str,
+    area: Optional[dict] = None,
+    target_types: Optional[List[str]] = None,
+    threshold: float = 0.3,
+    target_max: int = 1,
+    target_min: int = 0,
+    duration: int = 3,
+    cooldown: int = 600,
+    agent_llm: Optional[dict] = None,
+    target_expand: Optional[dict] = None,
+    rule_id: int = 1,
+) -> dict:
+    """构造 monitor.warehouse_v20_param.rulesParams 中的【单条规则】(= 一个小模型算法)。
+
+    一个算法的唯一身份 = (算法仓 algoCabinName, eventType)：同一算法仓内可挂多条规则，
+    每条对应一个 eventType；build_warehouse_monitor 会把多条规则组装进同一条 monitor。
+    agent_llm 非空时该规则为『小+大』：挂 aiotapCustom.agentLLMParam、切 full_analysis、
+    带扩图 target_expand（缺省对称默认值）。ruleId 由 build_warehouse_monitor 统一重排为 1..N。
+    """
+    area = area or full_frame_area()
+    target_types = target_types or ["PERSON"]
+    extend_params = {
+        "targetMax": target_max,
+        "targetMin": target_min,
+        "duration": duration,
+        "cooldownDuration": cooldown,
+        "threshold": threshold,
+        "targetTypes": target_types,
+        "level": "ALARM_LEVEL",
+    }
+    if agent_llm:
+        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm}
+        extend_params["analysis_mode"] = "full_analysis"
+        extend_params["target_expand"] = target_expand or {"left": 0.4, "top": 0.5, "right": 0.6, "bottom": 0.3}
+    return {
+        "areas": [area],
+        "eventType": event_type,
+        "ruleId": rule_id,
+        "extendParams": extend_params,
+    }
+
+
+def build_warehouse_monitor(
+    task_id,
+    channel_device_id: int,
+    algo_cabin_name: str,
+    rules: List[dict],
+    version: str = "V2.0.0",
+    monitor_id: Optional[int] = None,
+    monitor_name: Optional[str] = None,
+    enable: bool = True,
+) -> dict:
+    """把【同一算法仓】的多条规则(rulesParams)组装成一条 monitor。
+
+    设备存储模型：一个算法仓 = 一条 monitor，可挂多条 rulesParams（各对应一个 eventType）；
+    跨算法仓时则是【共享同一 monitor_id】的多条 monitor（靠 labels.algoCabinName 区分）。
+    create_monitor 以 (monitor_id + algoCabinName) 为键覆盖该仓 monitor 的整份 rulesParams，
+    故增/改/删单个算法都要把该仓【全部保留的规则】一次性传入。rules 内 ruleId 重排为 1..N。
+    enable=False 用于『停用』降级（无硬删除接口时，清空算法/清除任务以覆盖方式停用而非删除）。
+    monitor_id 缺省由 task_id 派生（单 BOX 内简化的唯一 id 方案）。
+    """
+    if monitor_id is None:
+        try:
+            monitor_id = int(task_id)
+        except (TypeError, ValueError):
+            monitor_id = 1
+    norm_rules = []
+    for idx, rule in enumerate(rules or [], start=1):
+        r = dict(rule)
+        r["ruleId"] = idx
+        norm_rules.append(r)
+    first_event = (norm_rules[0].get("eventType") if norm_rules else None) or "warehouse"
+    return {
+        "common_param": {
+            "task_id": task_id,
+            "alg_type": ["bypass"],
+            "channel_id": 0,
+            "channel_type": 1,
+            "device_id": channel_device_id,
+            "enable": enable,
+            "monitor_id": monitor_id,
+            "monitor_name": monitor_name or f"monitor_{first_event}",
+            "warehouse_v20_param": {
+                "labels": {"algoCabinName": algo_cabin_name, "version": version},
+                "rulesParams": norm_rules,
+            },
+        },
+        "extend_param": {"aiotap_box_param": {"warehouse_param": {"enable": enable}}},
+    }
+
+
 def build_monitor_payload(
     task_id,
     channel_device_id: int,
@@ -148,59 +240,37 @@ def build_monitor_payload(
     duration: int = 3,
     cooldown: int = 600,
     agent_llm: Optional[dict] = None,
+    target_expand: Optional[dict] = None,
 ) -> dict:
-    """算法仓任务第二步 monitor。
+    """算法仓任务第二步 monitor（【单算法】便捷入口，委托到 build_rule + build_warehouse_monitor）。
 
     agent_llm 非空时挂载 aiotapCustom.agentLLMParam 并切换 analysis_mode=full_analysis，
     即『小+大』任务；为空则是『纯小模型』任务。
+    target_expand 为『小+大』任务的扩图策略（缺省对称默认值），仅在 agent_llm 非空分支内生效。
     monitor_id 缺省由 task_id 派生（单 BOX 内简化的唯一 id 方案）。
+    需要在同一算法仓挂多条算法、或跨仓增删改时，请直接用 build_rule + build_warehouse_monitor。
     """
-    area = area or full_frame_area()
-    target_types = target_types or ["PERSON"]
-    if monitor_id is None:
-        try:
-            monitor_id = int(task_id)
-        except (TypeError, ValueError):
-            monitor_id = 1
-
-    extend_params = {
-        "targetMax": target_max,
-        "targetMin": target_min,
-        "duration": duration,
-        "cooldownDuration": cooldown,
-        "threshold": threshold,
-        "targetTypes": target_types,
-        "level": "ALARM_LEVEL",
-    }
-    if agent_llm:
-        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm}
-        extend_params["analysis_mode"] = "full_analysis"
-        extend_params["target_expand"] = {"left": 0.4, "top": 0.5, "right": 0.6, "bottom": 0.3}
-
-    return {
-        "common_param": {
-            "task_id": task_id,
-            "alg_type": ["bypass"],
-            "channel_id": 0,
-            "channel_type": 1,
-            "device_id": channel_device_id,
-            "enable": True,
-            "monitor_id": monitor_id,
-            "monitor_name": monitor_name or f"monitor_{event_type}",
-            "warehouse_v20_param": {
-                "labels": {"algoCabinName": algo_cabin_name, "version": version},
-                "rulesParams": [
-                    {
-                        "areas": [area],
-                        "eventType": event_type,
-                        "ruleId": 1,
-                        "extendParams": extend_params,
-                    }
-                ],
-            },
-        },
-        "extend_param": {"aiotap_box_param": {"warehouse_param": {"enable": True}}},
-    }
+    rule = build_rule(
+        event_type=event_type,
+        area=area,
+        target_types=target_types,
+        threshold=threshold,
+        target_max=target_max,
+        target_min=target_min,
+        duration=duration,
+        cooldown=cooldown,
+        agent_llm=agent_llm,
+        target_expand=target_expand,
+    )
+    return build_warehouse_monitor(
+        task_id,
+        channel_device_id,
+        algo_cabin_name,
+        [rule],
+        version=version,
+        monitor_id=monitor_id,
+        monitor_name=monitor_name,
+    )
 
 
 def build_agent_llm_param(agent: dict, prompt: Optional[str] = None,
@@ -295,11 +365,12 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
     if task:
         if task.get("task_name"):
             cfg["name"] = task.get("task_name")
-        if task.get("analysis_interval") is not None:
-            cfg["interval"] = task.get("analysis_interval")
 
     # 纯大模型任务：无 monitor，从 agent_list 还原多智能体 + 每智能体 ROI 绑定
     if cfg["taskMode"] == "agent":
+        # 分析间隔仅【智能体任务】有此概念（小模型/小+大为实时分析，无分析间隔）
+        if task and task.get("analysis_interval") is not None:
+            cfg["interval"] = task.get("analysis_interval")
         cfg.update(_agent_task_panel(task))
         agent_list = (task or {}).get("agent_list") or []
         if agent_list:
@@ -345,13 +416,112 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
         if "right" in expand:
             cfg["cropRight"] = expand.get("right")
 
-    # 小+大任务的二次大模型参数
-    agent_llm = (ep.get("aiotapCustom") or {}).get("agentLLMParam") or {}
-    if agent_llm.get("event_tag"):
-        cfg["agentType"] = agent_llm.get("event_tag")
-    if agent_llm.get("prompt"):
-        cfg["prompt"] = agent_llm.get("prompt")
+    return cfg
 
+
+def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str, rois: List[dict]) -> dict:
+    """把一条 rulesParams 规则抽取为面板 algorithms[] 中的一项，并把其 ROI 归入共享池 rois。
+
+    字段抽取与 monitor_to_panel_config 一致（阈值/目标/时长/冷却/扩图/二次大模型），但产出【逐算法】形状：
+    kind + event_type + algo_cabin_name + 各参数 + 绑定池 ROI 的 roiId（全画面归一化到 'full'）。
+    rois 为共享池，就地追加非全画面 ROI（每条算法各自一个 ROI，直接兑现『不同算法不同 ROI』）。
+    """
+    ep = rule.get("extendParams") or {}
+    agent_llm = (ep.get("aiotapCustom") or {}).get("agentLLMParam") or {}
+    kind = "combined" if agent_llm else "small"
+
+    areas = rule.get("areas") or []
+    points = (areas[0].get("points") if areas and isinstance(areas[0], dict) else None) or []
+    if points and not _is_full_frame(points):
+        roi_id = f"roi_{len(rois)}"
+        rois.append({"id": roi_id, "name": f"检测区{len(rois)}", "points": points})
+        use_full = False
+    else:
+        roi_id = "full"
+        use_full = True
+
+    item: dict = {
+        "kind": kind,
+        "event_type": rule.get("eventType"),
+        "algo_cabin_name": algo_cabin_name,
+        "version": version,
+        "roiId": roi_id,
+        "useFullFrame": use_full,
+    }
+    if "targetMax" in ep:
+        item["maxTarget"] = ep.get("targetMax")
+    if "targetMin" in ep:
+        item["minTarget"] = ep.get("targetMin")
+    if "duration" in ep:
+        item["intrusionDuration"] = ep.get("duration")
+    if "cooldownDuration" in ep:
+        item["alarmInterval"] = ep.get("cooldownDuration")
+    if "threshold" in ep:
+        # payload 仅一个 threshold，对齐前端人体阈值（车辆/非机动车阈值无来源，前端保持默认）
+        item["yoloHumanThresh"] = ep.get("threshold")
+    if ep.get("targetTypes"):
+        item["yoloTarget"] = _target_type_to_yolo(ep.get("targetTypes"))
+
+    # 扩图区域仅『小+大』规则才有 target_expand
+    expand = ep.get("target_expand") or {}
+    if expand:
+        if "top" in expand:
+            item["cropUp"] = expand.get("top")
+        if "bottom" in expand:
+            item["cropDown"] = expand.get("bottom")
+        if "left" in expand:
+            item["cropLeft"] = expand.get("left")
+        if "right" in expand:
+            item["cropRight"] = expand.get("right")
+
+    # 『小+大』规则的二次大模型参数
+    if agent_llm.get("event_id"):
+        item["agent_id"] = agent_llm.get("event_id")
+    if agent_llm.get("event_tag"):
+        item["event_tag"] = agent_llm.get("event_tag")
+        item["agentType"] = agent_llm.get("event_tag")
+    if agent_llm.get("prompt"):
+        item["prompt"] = agent_llm.get("prompt")
+    if agent_llm.get("alarm_type"):
+        item["alarm_type"] = agent_llm.get("alarm_type")
+
+    return item
+
+
+def monitors_to_panel_config(task: dict, monitors: Optional[List[dict]]) -> dict:
+    """把设备任务 + 其【全部 monitor / 全部 rulesParams】逆映射为面板可回填 config（多算法版）。
+
+    与 _agent_task_panel 对称：产出共享 ROI 池 rois[] + 逐算法 algorithms[]（每条算法各自绑定池 ROI）。
+    - 纯大模型任务（无 monitor）→ 委托 monitor_to_panel_config 走 agent 分支（agents[]/rois[]）。
+    - 算法仓任务 → 遍历所有 monitor 的所有 rulesParams，每条规则一项 algorithms[]，
+      taskMode=任一规则含 agentLLMParam 即 combined 否则 smallmodel。
+    纯函数、无 I/O，供快照 detail 烘焙使用（替代只读 rulesParams[0] 的旧单算法逆映射）。
+    与前端 defaultConfig 未覆盖的键由前端 `{...defaultConfig, ...detail}` 兜底。
+    """
+    if (task or {}).get("task_type") == "agent_real_task":
+        return monitor_to_panel_config(task, None)
+
+    cfg: dict = {}
+    if task and task.get("task_name"):
+        cfg["name"] = task.get("task_name")
+
+    rois: List[dict] = [{"id": "full", "name": "全屏检测", "points": []}]
+    algorithms: List[dict] = []
+    mode = "smallmodel"
+    for mon in monitors or []:
+        cabin = _algo_cabin_name(mon)
+        warehouse = (mon.get("common_param") or {}).get("warehouse_v20_param") or {}
+        version = (warehouse.get("labels") or {}).get("version") or "V2.0.0"
+        for rule in _warehouse_rules(mon):
+            item = _rule_to_algorithm(rule, cabin, version, rois)
+            if item.get("kind") == "combined":
+                mode = "combined"
+            algorithms.append(item)
+
+    cfg["taskMode"] = mode
+    cfg["algorithms"] = algorithms
+    cfg["rois"] = rois
+    cfg["activeAlgorithmIndex"] = 0
     return cfg
 
 
@@ -362,6 +532,22 @@ def _first_rule(mon: Optional[dict]) -> Optional[dict]:
     warehouse = (mon.get("common_param") or {}).get("warehouse_v20_param") or {}
     rules = warehouse.get("rulesParams") or []
     return rules[0] if rules else None
+
+
+def _warehouse_rules(mon: Optional[dict]) -> List[dict]:
+    """从 monitor 取整份 common_param.warehouse_v20_param.rulesParams（多算法同仓时不止一条）。缺失返回 []。"""
+    if not mon:
+        return []
+    warehouse = (mon.get("common_param") or {}).get("warehouse_v20_param") or {}
+    return warehouse.get("rulesParams") or []
+
+
+def _algo_cabin_name(mon: Optional[dict]) -> Optional[str]:
+    """从 monitor 取算法仓名 common_param.warehouse_v20_param.labels.algoCabinName（缺失返回 None）。"""
+    if not mon:
+        return None
+    warehouse = (mon.get("common_param") or {}).get("warehouse_v20_param") or {}
+    return (warehouse.get("labels") or {}).get("algoCabinName")
 
 
 def build_agent_item_payload(event_id: str, event_tag: str, prompt: str,

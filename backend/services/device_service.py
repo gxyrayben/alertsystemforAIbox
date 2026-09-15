@@ -241,6 +241,8 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] 
                 "agents_tasks":task_agents,
                 "algorithms":list(algorithms),
                 "monitor_tasks":[],
+                # 查看回填：纯大模型任务无 monitor，从 task.agent_list 还原多智能体 + 每智能体 ROI
+                "detail": task_builders.monitor_to_panel_config(task, None),
             })
 
     for task in monitor_by_task:
@@ -427,7 +429,135 @@ class DeviceService:
         return await DeviceService.authed_post(client, device, db, "/intelli_manager/monitor", body)
 
     @staticmethod
-    async def list_monitors(client, device, db=None):
+    async def deploy_warehouse_task(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], *,
+        task_name: str,
+        channel_device_id: int,
+        event_type: str,
+        algo_cabin_name: str,
+        version: str = "V2.0.0",
+        monitor_name: Optional[str] = None,
+        area: Optional[dict] = None,
+        target_types: Optional[List[str]] = None,
+        threshold: float = 0.3,
+        target_max: int = 1,
+        target_min: int = 0,
+        duration: int = 3,
+        cooldown: int = 600,
+        agent_llm: Optional[dict] = None,
+        target_expand: Optional[dict] = None,
+    ) -> Tuple[bool, str, Optional[str]]:
+        """算法仓任务两步下发的共享封装（纯小模型 & 小+大共用）。
+
+        流程：create_task(single_point_task) → 取 data.task_id → create_monitor（带/不带 agent_llm）。
+        返回 (成功?, 中文消息, task_id)。部分失败语义：任务已建但 monitor 失败时，
+        返回 (False, 孤儿提示, task_id)，让调用方能把 task_id 回传便于排查/清理。
+        agent_llm 非空即『小+大』任务，target_expand 仅在该分支生效（见 build_monitor_payload）。
+        小模型/小+大为【实时分析】，无分析间隔/抽帧间隔概念（见 build_single_point_task_payload）。
+        """
+        # 第一步：创建 single_point_task 拿 task_id
+        task_payload = task_builders.build_single_point_task_payload(
+            task_name, channel_device_id, event_type,
+        )
+        task_res = await DeviceService.create_task(client, device, db, task_payload)
+        if not task_res or task_res.get("code") != 0:
+            msg = (task_res or {}).get("message") or "设备不可达或返回错误"
+            return False, f"创建任务失败：{msg}", None
+        task_id = (task_res.get("data") or {}).get("task_id")
+        if not task_id:
+            return False, "创建任务成功但未返回 task_id，无法继续下发 monitor", None
+
+        # 第二步：下发 monitor（algo_cabin_name / 阈值 / 目标 / 扩图 / 二次大模型等）
+        monitor_payload = task_builders.build_monitor_payload(
+            task_id, channel_device_id, event_type, algo_cabin_name,
+            version=version, monitor_name=monitor_name, area=area,
+            target_types=target_types, threshold=threshold,
+            target_max=target_max, target_min=target_min,
+            duration=duration, cooldown=cooldown,
+            agent_llm=agent_llm, target_expand=target_expand,
+        )
+        mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
+        if not mon_res or mon_res.get("code") != 0:
+            msg = (mon_res or {}).get("message") or "设备不可达或返回错误"
+            # 孤儿：任务已建但 monitor 下发失败，回传 task_id 便于排查/清理
+            return False, f"任务已创建(task_id={task_id})但下发 monitor 失败：{msg}", task_id
+
+        return True, f"布控任务创建成功（task_id={task_id}）", task_id
+
+    @staticmethod
+    async def deploy_warehouse_task_multi(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], *,
+        task_name: str,
+        channel_device_id: int,
+        algorithms: List[dict],
+    ) -> Tuple[bool, str, Optional[str]]:
+        """算法仓任务【多算法】两步下发：一次提交把 N 条算法布控到一个任务。
+
+        流程：create_task(single_point_task，首算法 eventType 作锚点) → 取 task_id →
+        按 algo_cabin_name 分组（保序）→ 每仓把该仓全部规则组装成一条 monitor 下发。
+        关键契约：所有仓【共享同一 monitor_id=int(task_id)】（build_warehouse_monitor 默认值），
+        与 add/update/remove_task_algorithm 的跨仓定位方式一致（靠 labels.algoCabinName 区分仓、
+        eventType 区分规则）；同仓 eventType 唯一由上层校验保证。
+
+        每个 algorithm 入参（router 已预解析 I/O 相关字段）：event_type / algo_cabin_name / version /
+        target_types / threshold / target_max / target_min / duration / cooldown /
+        area（绑定 ROI 或全画面，router 解析）/ agent_llm（仅 combined，router 解析）/ target_expand。
+        返回 (成功?, 中文消息, task_id)；建任务后部分仓失败时返回 (False, 孤儿提示, task_id)。
+        """
+        if not algorithms:
+            return False, "未提供任何算法，无法下发任务", None
+
+        # 第一步：创建 single_point_task 拿 task_id（真实规则在各仓 monitor 里）
+        task_payload = task_builders.build_single_point_task_payload(
+            task_name, channel_device_id, algorithms[0].get("event_type"),
+        )
+        task_res = await DeviceService.create_task(client, device, db, task_payload)
+        if not task_res or task_res.get("code") != 0:
+            msg = (task_res or {}).get("message") or "设备不可达或返回错误"
+            return False, f"创建任务失败：{msg}", None
+        task_id = (task_res.get("data") or {}).get("task_id")
+        if not task_id:
+            return False, "创建任务成功但未返回 task_id，无法继续下发 monitor", None
+
+        # 按算法仓分组（dict 保序，等价于按首次出现顺序）
+        groups: dict = {}
+        for algo in algorithms:
+            groups.setdefault(algo.get("algo_cabin_name"), []).append(algo)
+
+        # 第二步：逐仓组装 rulesParams → 下发一条 monitor（各仓共享默认 monitor_id=int(task_id)）
+        failed: List[str] = []
+        for cabin, group in groups.items():
+            rules = [
+                task_builders.build_rule(
+                    event_type=algo.get("event_type"),
+                    area=algo.get("area"),
+                    target_types=algo.get("target_types"),
+                    threshold=algo.get("threshold", 0.3),
+                    target_max=algo.get("target_max", 1),
+                    target_min=algo.get("target_min", 0),
+                    duration=algo.get("duration", 3),
+                    cooldown=algo.get("cooldown", 600),
+                    agent_llm=algo.get("agent_llm"),
+                    target_expand=algo.get("target_expand"),
+                )
+                for algo in group
+            ]
+            monitor_payload = task_builders.build_warehouse_monitor(
+                task_id, channel_device_id, cabin, rules,
+                version=group[0].get("version", "V2.0.0"), monitor_name=task_name,
+            )
+            mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
+            if not mon_res or mon_res.get("code") != 0:
+                msg = (mon_res or {}).get("message") or "设备不可达或返回错误"
+                failed.append(f"「{cabin}」：{msg}")
+
+        if failed:
+            return (False,
+                    f"任务已创建(task_id={task_id})但下发 {len(failed)}/{len(groups)} 个算法仓失败："
+                    + "；".join(failed), task_id)
+        return (True,
+                f"布控任务创建成功（task_id={task_id}，{len(groups)} 个算法仓 / {len(algorithms)} 个算法）",
+                task_id)
         """拉取设备 monitor 列表（用于富化任务摘要里的小模型算法名）。
 
         MONITOR_LIST_PATH 未在协议文档核实，属 best-effort；authed_post 已对网络/异常返回 None，
@@ -573,20 +703,24 @@ class DeviceService:
                 algorithms: set = set()
                 if task_type == "single_point_task":
                     res = await client.post(f"{base_url}{MONITOR_LIST_PATH}", json={"device_id": device_id, "task_id": task_id})
+                    param: List[dict] = []
                     if res.status_code == 200 and res.json().get("code") == 0:
-                         monitor_data, task_type ,algorithms = _index_monitors(res.json().get("data", {}).get("param", []))
+                         param = res.json().get("data", {}).get("param", []) or []
+                         monitor_data, task_type ,algorithms = _index_monitors(param)
                          monitor_param.extend(monitor_data)
 
                     results.append({
                         "task_type":task_type,
-                        "task_id": task_id, 
-                        "task_name": task.get("task_name", ""), 
+                        "task_id": task_id,
+                        "task_name": task.get("task_name", ""),
                         "task_status":task_status,
                         "camera_device_name": device_name,
                         "camera_device_id": device_id,
                         "monitor_tasks": monitor_param,
                         "algorithms": list(algorithms),
                         "agents_tasks": [],
+                        # 查看回填：把设备任务 + 其全部 monitor/rulesParams 逆映射为面板可展开的多算法真实参数
+                        "detail": task_builders.monitors_to_panel_config(task, param),
                     })
 
             return results
