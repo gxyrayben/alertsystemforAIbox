@@ -3,8 +3,10 @@
 工具分两类：
 - 平台本地台账：list_devices / list_tasks / create_task / update_task（操作 TaskORM）
 - 设备侧能力与布控：get_device_streams / get_device_control_tasks（快照）+
-  check_algorithm_authorization / list_device_algorithms / list_agents / create_agent /
-  create_smallmodel_task / create_agent_task / create_combined_task（实时调设备 API）
+  check_algorithm_authorization / list_device_algorithms / list_agents / create_agent（实时调设备 API）。
+  布控任务的【创建】统一由 propose_deployment 产出方案草案推送前端，用户在面板确认参数/绘制 ROI 后，
+  再经 /devices/{id}/deploy/* 真正下发（对话侧不直接下发）；已下发任务的改/增/删走
+  update_device_task / add_task_algorithm / remove_task_algorithm。
 """
 import json, uuid, time
 from typing import Optional
@@ -413,80 +415,12 @@ TOOLS = [
         },
     },
     {
-        "name": "create_smallmodel_task",
-        "description": "创建【纯小模型算法任务】：会先校验设备算法授权，再两步下发（task + monitor）。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "device_id":         {"type": "string", "description": "设备业务ID"},
-                "channel_device_id": {"type": "integer", "description": "视频流通道 device_id（来自 get_device_streams）"},
-                "task_name":         {"type": "string", "description": "任务名称"},
-                "event_type":        {"type": "string", "description": "算法事件类型，如 INTRUSION（来自 list_device_algorithms）"},
-                "algo_cabin_name":   {"type": "string", "description": "算法仓名 algoCabinName（来自 list_device_algorithms）"},
-                "version":           {"type": "string", "description": "算法仓版本，默认 V2.0.0"},
-                "target_types":      {"type": "array", "items": {"type": "string"}, "description": "检测目标类型，默认 [PERSON]"},
-                "threshold":         {"type": "number", "description": "报警阈值 0~1，默认 0.3"},
-                "target_max":        {"type": "integer", "description": "最大目标数，默认 1"},
-                "target_min":        {"type": "integer", "description": "最小目标数，默认 0"},
-                "duration":          {"type": "integer", "description": "持续时长(秒)，默认 3"},
-                "cooldown":          {"type": "integer", "description": "报警间隔/冷却时长(秒)，默认 600"},
-                "roiPoints":         {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]，默认全画面"},
-            },
-            "required": ["device_id", "channel_device_id", "task_name", "event_type", "algo_cabin_name"],
-        },
-    },
-    {
-        "name": "create_agent_task",
-        "description": "创建【纯大模型任务】（agent_real_task）：会先校验对应智能体算法存在（不存在会提示先新建），单步下发。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "device_id":         {"type": "string", "description": "设备业务ID"},
-                "channel_device_id": {"type": "integer", "description": "视频流通道 device_id（来自 get_device_streams）"},
-                "task_name":         {"type": "string", "description": "任务名称"},
-                "agent_id":          {"type": "string", "description": "智能体算法 agent_id/event_id（来自 list_agents）"},
-                "prompt":            {"type": "string", "description": "覆盖提示词，可为空（默认用智能体自带 prompt）"},
-                "alarm_condition":   {"type": "string", "description": "报警条件，可为空"},
-                "analysis_interval": {"type": "integer", "description": "分析间隔秒，默认 5（仅智能体任务有此概念）"},
-                "filter_enable":     {"type": "boolean", "description": "是否开启结果过滤（仅描述型 freeform 智能体生效），默认关闭"},
-                "filter_keywords":   {"type": "string", "description": "过滤关键词（filter_enable 开启时生效），可为空"},
-            },
-            "required": ["device_id", "channel_device_id", "task_name", "agent_id"],
-        },
-    },
-    {
-        "name": "create_combined_task",
-        "description": "创建【小+大任务】：小模型报警后再经大模型二次分析。会同时校验算法授权与智能体算法，两步下发（monitor 挂载 agentLLMParam）。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "device_id":         {"type": "string", "description": "设备业务ID"},
-                "channel_device_id": {"type": "integer", "description": "视频流通道 device_id（来自 get_device_streams）"},
-                "task_name":         {"type": "string", "description": "任务名称"},
-                "event_type":        {"type": "string", "description": "小模型算法事件类型（来自 list_device_algorithms）"},
-                "algo_cabin_name":   {"type": "string", "description": "算法仓名 algoCabinName（来自 list_device_algorithms）"},
-                "agent_id":          {"type": "string", "description": "智能体算法 agent_id/event_id（来自 list_agents）"},
-                "prompt":            {"type": "string", "description": "覆盖大模型提示词，可为空"},
-                "version":           {"type": "string", "description": "算法仓版本，默认 V2.0.0"},
-                "target_types":      {"type": "array", "items": {"type": "string"}, "description": "检测目标类型，默认 [PERSON]"},
-                "threshold":         {"type": "number", "description": "报警阈值 0~1，默认 0.3"},
-                "target_max":        {"type": "integer", "description": "最大目标数，默认 1"},
-                "target_min":        {"type": "integer", "description": "最小目标数，默认 0"},
-                "duration":          {"type": "integer", "description": "持续时长(秒)，默认 3"},
-                "cooldown":          {"type": "integer", "description": "报警间隔/冷却时长(秒)，默认 600"},
-                "roiPoints":         {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]，默认全画面"},
-                "target_expand":     {"type": "object", "description": "扩图策略{top,bottom,left,right}(0~1)，仅小+大生效，默认对称扩图"},
-            },
-            "required": ["device_id", "channel_device_id", "task_name", "event_type", "algo_cabin_name", "agent_id"],
-        },
-    },
-    {
         "name": "propose_deployment",
         "description": "生成一份【布控方案预览】并推送到界面：会先做依赖校验（小模型任务校验算法授权、"
                        "大模型任务校验智能体算法存在），通过后返回一组推荐参数供前端填充到"
                        "『AI级联提取与细化控制面板』，并在视频流展示区载入当前设备最新报警大图供用户画 ROI。"
-                       "当用户想创建布控任务、希望先在界面上预览/调参/画检测区时调用本工具；"
-                       "真正下发到设备仍使用 create_smallmodel_task / create_agent_task / create_combined_task。",
+                       "当用户想创建布控任务时调用本工具产出方案草案并推送界面（本工具【不下发】）；"
+                       "真正下发由用户在右侧面板确认参数、绘制 ROI 后点击部署（经 /devices/{id}/deploy/*）完成。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -584,7 +518,7 @@ TOOLS = [
     {
         "name": "create_task",
         "description": "在平台本地台账登记一条算法分析任务（不下发到设备）。仅用于平台内部记录，"
-                       "布控到设备请使用 create_smallmodel_task / create_agent_task / create_combined_task。",
+                       "布控到设备请用 propose_deployment 产出方案草案，由用户在右侧面板确认后部署。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -632,7 +566,7 @@ TOOLS = [
         "name": "apply_task_template",
         "description": "套用【参数模板库】中的一个模板：读取其参数快照，合并当前设备上下文后填充到右侧『AI级联提取与细化控制面板』，"
                        "并载入设备最新报警大图供用户绘制 ROI。套用后【不自动下发】——需用户在界面确认参数、画好检测区再点部署"
-                       "（真正下发仍走 create_smallmodel_task / create_agent_task / create_combined_task）。template_id 来自 list_task_templates。",
+                       "（真正下发由面板部署按钮经 /devices/{id}/deploy/* 完成）。template_id 来自 list_task_templates。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -780,79 +714,6 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         return _ok({"success": True, "id": data.get("data", {}).get("id"),
                     "message": f"智能体算法「{args['event_tag']}」已创建"})
 
-    if name == "create_agent_task":
-        device = await _get_device(db, args.get("device_id", ""))
-        if not device:
-            return _err("未找到设备，请先在『设备接入』添加并获取详情")
-        channel_id = int(args["channel_device_id"])
-        existing = None  # 命中的同通道现有大模型任务（若有）
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            agent, err = await _find_agent(client, device, db, args["agent_id"])
-            if err == "NOT_FOUND":
-                return _err(f"设备上不存在智能体算法「{args['agent_id']}」。"
-                            f"如需使用，请先确认是否新建该智能体算法（create_agent）。")
-            if err:
-                return _err(f"创建失败：{err}")
-
-            # 本次要挂载的智能体项：过滤仅对描述型(freeform)智能体生效（镜像 deploy_agent_task 的兜底）
-            is_attr = (agent.get("alarm_type") or "").lower() == "freeform"
-            new_item = {
-                "event_id": agent.get("event_id"),
-                "event_tag": agent.get("event_tag"),
-                "agent_config": tb.build_agent_config({
-                    **agent,
-                    "prompt": args.get("prompt") if args.get("prompt") is not None else agent.get("prompt", ""),
-                    "alarm_condition": args.get("alarm_condition"),
-                    "filter_enable": bool(args.get("filter_enable", False)) if is_attr else False,
-                    "filter_keywords": (args.get("filter_keywords", "") if is_attr else ""),
-                }),
-            }
-
-            # 该通道是否已有大模型任务(agent_real_task)：有则追加智能体，无则新建
-            tasks_data = await DeviceService.get_device_tasks(client, device, db)
-            if tasks_data and tasks_data.get("code") == 0:
-                for t in tasks_data.get("data", {}).get("list", []):
-                    if t.get("task_type") != "agent_real_task":
-                        continue
-                    if any(int(d.get("device_id", -1)) == channel_id for d in t.get("device_list", [])):
-                        existing = t
-                        break
-
-            if existing:
-                cur = existing.get("agent_list", []) or []
-                # 幂等：同一智能体已在任务中，直接返回成功，不重复添加
-                if any(str(a.get("event_id")) == str(new_item["event_id"]) for a in cur):
-                    return _ok({"success": True, "task_id": existing.get("task_id"),
-                                "message": f"通道已在任务「{existing.get('task_name')}」中关联智能体"
-                                           f"「{agent.get('event_tag')}」，无需重复添加"})
-                # 上限保护：一个任务最多关联 4 个智能体算法
-                if len(cur) >= 4:
-                    return _err(f"任务「{existing.get('task_name')}」已关联 {len(cur)} 个智能体算法，"
-                                f"达上限 4，无法再新增。")
-                existing["agent_list"] = cur + [new_item]
-                payload = DeviceService.build_task_payload(existing)  # 白名单保留 task_id/task_name/agent_list…
-                data = await DeviceService.update_task(client, device, db, payload)
-            else:
-                payload = tb.build_agent_task_payload(
-                    args["task_name"], channel_id, agent,
-                    prompt=args.get("prompt"), alarm_condition=args.get("alarm_condition"),
-                    analysis_interval=args.get("analysis_interval", 5))
-                data = await DeviceService.create_task(client, device, db, payload)
-
-        if data is None:
-            return _err(f"设备「{device.name}」离线或不可达，任务下发失败")
-        if data.get("code") != 0:
-            return _err(f"任务下发失败：{data.get('message')}")
-        if existing:
-            return _ok({"success": True, "task_id": existing.get("task_id"),
-                        "message": f"智能体算法「{agent.get('event_tag')}」已追加至任务"
-                                   f"「{existing.get('task_name')}」（现关联 {len(existing['agent_list'])} 个）"})
-        return _ok({"success": True, "task_id": data.get("data", {}).get("task_id"),
-                    "message": f"纯大模型任务「{args['task_name']}」已下发"})
-
-    if name in ("create_smallmodel_task", "create_combined_task"):
-        return await _create_warehouse_task(name, args, db)
-
     if name == "propose_deployment":
         return await _propose_deployment(args, db)
 
@@ -897,55 +758,6 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         return _ok({"success": True, "message": f"任务 {task_id} 已更新"})
 
     return _err(f"未知工具: {name}")
-
-
-async def _create_warehouse_task(name: str, args: dict, db: AsyncSession) -> str:
-    """算法仓任务（纯小模型 / 小+大）共享的两步下发流程。"""
-    combined = name == "create_combined_task"
-    device = await _get_device(db, args.get("device_id", ""))
-    if not device:
-        return _err("未找到设备，请先在『设备接入』添加并获取详情")
-
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        # 1) 算法授权校验
-        pkgs, err = await _authorized_packages(client, device, db)
-        if err:
-            return _err(f"无法校验算法授权：{err}")
-        if not _is_authorized(pkgs, args["algo_cabin_name"]):
-            available = "、".join(p.get("package_name", "") for p in pkgs) or "（无）"
-            return _err(f"设备未授权算法「{args['algo_cabin_name']}」，无法创建任务。当前已授权：{available}")
-
-        # 小+大：额外校验智能体算法存在，构造二次大模型参数（LLM 层职责，故留在此处）
-        agent_llm = None
-        if combined:
-            agent, aerr = await _find_agent(client, device, db, args["agent_id"])
-            if aerr == "NOT_FOUND":
-                return _err(f"设备上不存在智能体算法「{args['agent_id']}」，请先确认是否新建（create_agent）。")
-            if aerr:
-                return _err(f"创建失败：{aerr}")
-            agent_llm = tb.build_agent_llm_param(agent, prompt=args.get("prompt"))
-
-        # ROI：给了 roiPoints 用其构造检测区，否则全画面
-        roi_points = args.get("roiPoints")
-        area = ({"areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": roi_points}
-                if roi_points else tb.full_frame_area())
-
-        # 2) 两步下发（create_task → monitor）交给共享 helper，统一失败/孤儿语义
-        ok, msg, task_id = await DeviceService.deploy_warehouse_task(
-            client, device, db,
-            task_name=args["task_name"], channel_device_id=int(args["channel_device_id"]),
-            event_type=args["event_type"], algo_cabin_name=args["algo_cabin_name"],
-            version=args.get("version", "V2.0.0"), monitor_name=args["task_name"], area=area,
-            target_types=args.get("target_types"), threshold=args.get("threshold", 0.3),
-            target_max=args.get("target_max", 1), target_min=args.get("target_min", 0),
-            duration=args.get("duration", 3), cooldown=args.get("cooldown", 600),
-            agent_llm=agent_llm, target_expand=args.get("target_expand"))
-
-    if not ok:
-        return _err(msg)
-    kind = "小+大" if combined else "纯小模型"
-    return _ok({"success": True, "task_id": task_id,
-                "message": f"{kind}任务「{args['task_name']}」已下发（task_id={task_id}）"})
 
 
 async def _update_device_task(args: dict, db: AsyncSession) -> str:
@@ -1150,8 +962,7 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
             agent_llm = tb.build_agent_llm_param(agent, prompt=args.get("prompt"))
 
         roi_points = args.get("roiPoints")
-        area = ({"areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": roi_points}
-                if roi_points else tb.full_frame_area())
+        area = tb.roi_area(roi_points)
         new_rule = tb.build_rule(
             event_type=event_type, area=area,
             target_types=args.get("target_types"), threshold=args.get("threshold", 0.3),
@@ -1352,12 +1163,60 @@ def _recommended_config(task_name: str, event_type: Optional[str] = None) -> dic
     return {**scene_presets.preset_for(event_type), "name": task_name}
 
 
+def _deployed_agents_on_channel(device, channel_device_id) -> tuple:
+    """从设备快照(device.device_tasks)取出【指定通道】已布控的纯大模型智能体 + 其 ROI。
+
+    返回 (agents, rois)，均为右侧面板形状（与 propose 的 agent 草案同构），供默认铺入槽位：
+    - 仅匹配 task_type == 'agent_real_task' 且 camera_device_id == channel_device_id 的任务；
+    - 逐任务 detail.agents / detail.rois 合并进统一池，跨任务 ROI 重命名(dep_ 前缀)避免 id 冲突；
+    - 每个 agent 标记 deployed=True（前端据此与『即将布控』分别展示）；同一智能体跨任务只取一次；
+    - 快照的 agents[] 无 alarm_type，用 device.agents 目录按 event_id 兜底回填。
+    """
+    if channel_device_id is None:
+        return [], []
+    catalog = {str(a.get("event_id")): a for a in _load_json(device.agents)}
+    agents_out, rois_out, seen = [], [], set()
+    for task in _load_json(device.device_tasks):
+        if task.get("task_type") != "agent_real_task":
+            continue
+        if str(task.get("camera_device_id")) != str(channel_device_id):
+            continue
+        detail = task.get("detail") or {}
+        tid = task.get("task_id")
+        roi_by_id = {r.get("id"): r for r in (detail.get("rois") or [])}
+        for a in detail.get("agents") or []:
+            a = a or {}
+            eid = a.get("event_id")
+            if str(eid) in seen:
+                continue
+            seen.add(str(eid))
+            roi_id = a.get("roiId") or "full"
+            if roi_id != "full":
+                src = roi_by_id.get(roi_id) or {}
+                roi_id = f"dep_{tid}_{roi_id}"
+                rois_out.append({"id": roi_id, "name": src.get("name") or "检测区",
+                                 "points": src.get("points") or []})
+            cat = catalog.get(str(eid)) or {}
+            agents_out.append({
+                "event_id": eid,
+                "event_tag": a.get("event_tag") or cat.get("event_tag") or str(eid),
+                "alarm_type": a.get("alarm_type") or cat.get("alarm_type") or "freeform",
+                "prompt": a.get("prompt", ""),
+                "alarm_condition": a.get("alarm_condition"),
+                "filter_enable": bool(a.get("filter_enable", False)),
+                "filter_keywords": a.get("filter_keywords", "") or "",
+                "roiId": roi_id,
+                "deployed": True,
+            })
+    return agents_out, rois_out
+
+
 async def _propose_deployment(args: dict, db: AsyncSession) -> str:
     """依赖校验通过后，产出前端可直接填充的布控方案（推荐参数 + 元数据）。
 
     - smallmodel/combined：校验算法授权（落实『在有授权的情况下』）；
     - agent/combined：校验智能体算法存在，并借其 event_tag/prompt 作为推荐值。
-    方案本身不下发设备，真正布控仍走 create_* 工具。
+    方案本身不下发设备，由前端面板确认参数、绘制 ROI 后经 /devices/{id}/deploy/* 真正布控。
     """
     task_type = (args.get("task_type") or "").lower()
     if task_type not in ("smallmodel", "agent", "combined"):
@@ -1411,22 +1270,61 @@ async def _propose_deployment(args: dict, db: AsyncSession) -> str:
 
     # 纯大模型任务：补齐面板所需的多智能体 / ROI 结构 + 可选智能体下拉（离线用快照）
     if task_type == "agent":
-        available = _load_json(device.agents)
+        catalog = _load_json(device.agents)
+        # ① 本通道【已布控】的智能体先铺入槽位（deployed=True），与其 ROI 一并带入池
+        deployed_agents, deployed_rois = _deployed_agents_on_channel(
+            device, args.get("channel_device_id"))
+        # ② 本次【即将布控】的目标智能体（deployed=False）
+        new_agent = {
+            "event_id": (agent or {}).get("event_id") or args.get("agent_id"),
+            "event_tag": (agent or {}).get("event_tag") or str(args.get("agent_id")),
+            "alarm_type": (agent or {}).get("alarm_type") or "freeform",
+            "prompt": (agent or {}).get("prompt", ""),
+            "alarm_condition": tb._default_alarm_condition((agent or {}).get("alarm_type")),
+            "filter_enable": False,
+            "filter_keywords": "",
+            "roiId": "full",
+            "deployed": False,
+        }
+        # 目标智能体若已在本通道布控：不重复加槽，聚焦到已布控的那一项
+        dup_idx = next((i for i, a in enumerate(deployed_agents)
+                        if str(a.get("event_id")) == str(new_agent["event_id"])), None)
+        if dup_idx is not None:
+            slots = deployed_agents
+            active_index = dup_idx
+        else:
+            slots = deployed_agents + [new_agent]
+            active_index = len(slots) - 1
+        # 单任务上限 4 个智能体：超出则裁剪已布控项，但始终保留聚焦的目标项（保序）
+        if len(slots) > 4:
+            keep = slots[active_index]
+            trimmed, others = [], 0
+            for a in slots:
+                if a is keep:
+                    trimmed.append(a)
+                elif others < 3:
+                    trimmed.append(a)
+                    others += 1
+            slots = trimmed
+            active_index = slots.index(keep)
+        # ROI 池：全屏 + 仍被保留槽位引用到的已布控 ROI
+        used_roi_ids = {a.get("roiId") for a in slots}
+        rois = [{"id": "full", "name": "全屏检测", "points": []}] + \
+               [r for r in deployed_rois if r.get("id") in used_roi_ids]
+        # 下拉兜底：目录 ∪ 槽位内智能体（快照为空时也能显示已选项）
+        available = list(catalog)
+        known = {str(a.get("event_id")) for a in available}
+        for a in slots:
+            if str(a.get("event_id")) not in known:
+                available.append({"event_id": a.get("event_id"), "event_tag": a.get("event_tag"),
+                                  "alarm_type": a.get("alarm_type"), "prompt": a.get("prompt", "")})
+                known.add(str(a.get("event_id")))
         proposal.update({
             "taskMode": "agent",
             "interval": 5,
-            "agents": [{
-                "event_id": (agent or {}).get("event_id") or args.get("agent_id"),
-                "event_tag": (agent or {}).get("event_tag") or str(args.get("agent_id")),
-                "alarm_type": (agent or {}).get("alarm_type") or "freeform",
-                "prompt": (agent or {}).get("prompt", ""),
-                "alarm_condition": tb._default_alarm_condition((agent or {}).get("alarm_type")),
-                "filter_enable": False,
-                "filter_keywords": "",
-                "roiId": "full",
-            }],
-            "rois": [{"id": "full", "name": "全屏检测", "points": []}],
-            "activeAgentIndex": 0,
+            "agents": slots,
+            "rois": rois,
+            "activeAgentIndex": active_index,
             "available_agents": available,
         })
     return _ok({"success": True, "proposal": proposal,

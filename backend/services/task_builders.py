@@ -25,6 +25,23 @@ def full_frame_area(area_id: int = 1, name: str = "区域1") -> dict:
     }
 
 
+def roi_area(points) -> dict:
+    """给定归一化多边形点则构造检测区（areaName=检测区/POLYGON），为空则回退全画面。"""
+    if points:
+        return {"areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": points}
+    return full_frame_area()
+
+
+def index_agents(data: dict) -> dict:
+    """把设备智能体列表响应按 event_id / agent_id 建索引，供存在校验与字段兜底。"""
+    index = {}
+    for a in data.get("data", {}).get("list", []):
+        for key in (a.get("event_id"), a.get("agent_id")):
+            if key is not None:
+                index[str(key)] = a
+    return index
+
+
 def _default_alarm_condition(alarm_type: Optional[str]) -> str:
     """按智能体报警类型给出默认报警条件：判断型(yesno)→only_yes，描述型(freeform)→none。"""
     return "only_yes" if (alarm_type or "").lower() == "yesno" else "none"

@@ -192,7 +192,7 @@ async def _run_agent(config, user_messages, db: AsyncSession, system_prompt: str
     tables = []
     proposal = None
     for _ in range(5):
-        #print(f"before chat_with_tools: {messages}")
+        print(f"before chat_with_tools: {messages}")
         result = await llm_client.chat_with_tools(config, messages, TOOLS)
         print(f"after chat_with_tools: {result}")
         if "text" in result:           # if this is a result solution, return to userspace

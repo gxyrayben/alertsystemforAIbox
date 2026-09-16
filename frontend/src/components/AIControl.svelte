@@ -5,8 +5,23 @@
 
     const LS_CONV_KEY = 'aiChatConvId';
 
-    // image_1f70c6.png 在原型中为本地相机截图，这里用占位图代替
-    const CAM = 'https://placehold.co/800x500/1e293b/94a3b8?text=EdgeNode-01+Camera+Feed';
+    // 无报警大图时的默认场景：内联 SVG（自包含，不依赖外网/CDN，边缘内网可用），仍可在其上绘制 ROI
+    const CAM = 'data:image/svg+xml,' + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500">
+          <rect width="800" height="500" fill="#0f172a"/>
+          <g stroke="#1e293b" stroke-width="1">
+            <path d="M0 125H800M0 250H800M0 375H800M200 0V500M400 0V500M600 0V500"/>
+          </g>
+          <g fill="none" stroke="#334155" stroke-width="3">
+            <path d="M40 40H100M40 40V100M760 40H700M760 40V100M40 460H100M40 460V400M760 460H700M760 460V400"/>
+          </g>
+          <g transform="translate(400 210)" fill="none" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="-46" y="-30" width="70" height="52" rx="8"/>
+            <path d="M24 -12 54 -28V22L24 6"/>
+          </g>
+          <text x="400" y="300" fill="#64748b" font-family="sans-serif" font-size="24" font-weight="bold" text-anchor="middle">暂无报警大图</text>
+          <text x="400" y="332" fill="#475569" font-family="sans-serif" font-size="14" text-anchor="middle">默认场景 · 可直接在此绘制检测区(ROI)</text>
+        </svg>`);
     const CROP = 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=250&q=80';
 
     const WELCOME = {
@@ -1228,6 +1243,11 @@
                                     {#each config.agents as agent, i}
                                         <div class="flex items-center gap-1.5 p-1.5 rounded-lg border transition-colors cursor-pointer {i === config.activeAgentIndex ? 'border-indigo-500 bg-indigo-950/30' : 'border-slate-800 bg-slate-950/40 hover:border-slate-700'}" on:click={() => selectAgent(i)}>
                                             <span class="text-[9px] font-mono text-slate-500 w-4 text-center">{i + 1}</span>
+                                            {#if agent.deployed}
+                                                <span class="text-[8px] font-bold px-1 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-800/60 whitespace-nowrap" title="该通道已布控的智能体">已布控</span>
+                                            {:else}
+                                                <span class="text-[8px] font-bold px-1 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/60 whitespace-nowrap" title="本次即将布控的智能体">即将</span>
+                                            {/if}
                                             <select value={agent.event_id} on:change={(e) => changeAgent(i, e.target.value)} on:click|stopPropagation class="flex-1 bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-indigo-500 text-[11px]">
                                                 <option value="" disabled>选择智能体算法…</option>
                                                 {#each availableAgents as a}

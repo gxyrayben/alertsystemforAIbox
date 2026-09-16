@@ -129,11 +129,7 @@ async def deploy_agent_task(device_id: str, payload: AgentTaskDeploy, db: AsyncS
         if data.get("code") != 0:
             raise HTTPException(status_code=502, detail=data.get("message", "查询智能体算法失败"))
         # 按 event_id / agent_id 建索引，供存在校验与字段兜底
-        index = {}
-        for a in data.get("data", {}).get("list", []):
-            for key in (a.get("event_id"), a.get("agent_id")):
-                if key is not None:
-                    index[str(key)] = a
+        index = tb.index_agents(data)
 
         enriched = []
         for item in payload.agents:
@@ -144,9 +140,7 @@ async def deploy_agent_task(device_id: str, payload: AgentTaskDeploy, db: AsyncS
                     detail=f"设备上不存在智能体算法「{item.event_tag or item.event_id}」，请先在『智能体资产库』新建。")
             alarm_type = item.alarm_type or dev_agent.get("alarm_type") or "freeform"
             is_attr = (alarm_type or "").lower() == "freeform"
-            area = tb.full_frame_area() if not item.roiPoints else {
-                "areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": item.roiPoints,
-            }
+            area = tb.roi_area(item.roiPoints)
             enriched.append({
                 "event_id": item.event_id,
                 "event_tag": item.event_tag or dev_agent.get("event_tag") or str(item.event_id),
@@ -180,9 +174,7 @@ async def deploy_smallmodel_task(device_id: str, payload: SmallModelTaskDeploy, 
     deploy_warehouse_task 两步下发；成功后 best-effort 重刷快照使查看回填即时一致。
     """
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
-    area = tb.full_frame_area() if not payload.roiPoints else {
-        "areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": payload.roiPoints,
-    }
+    area = tb.roi_area(payload.roiPoints)
     async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
         ok, msg, task_id = await DeviceService.deploy_warehouse_task(
             client, device_obj, db,
@@ -216,9 +208,7 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
     再经共享 deploy_warehouse_task 两步下发（monitor 挂载 agent_llm + 扩图策略 target_expand）。
     """
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
-    area = tb.full_frame_area() if not payload.roiPoints else {
-        "areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": payload.roiPoints,
-    }
+    area = tb.roi_area(payload.roiPoints)
     async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
         data = await DeviceService.list_agents(client, device_obj, db)
         if data is None:
@@ -226,11 +216,7 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
         if data.get("code") != 0:
             raise HTTPException(status_code=502, detail=data.get("message", "查询智能体算法失败"))
         # 按 event_id / agent_id 建索引，供二次大模型智能体的存在校验与字段兜底
-        index = {}
-        for a in data.get("data", {}).get("list", []):
-            for key in (a.get("event_id"), a.get("agent_id")):
-                if key is not None:
-                    index[str(key)] = a
+        index = tb.index_agents(data)
         dev_agent = index.get(str(payload.agent_id))
         if dev_agent is None:
             raise HTTPException(
@@ -296,17 +282,12 @@ async def deploy_warehouse_task(device_id: str, payload: WarehouseTaskDeploy, db
                 raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达，无法下发任务")
             if data.get("code") != 0:
                 raise HTTPException(status_code=502, detail=data.get("message", "查询智能体算法失败"))
-            for a in data.get("data", {}).get("list", []):
-                for key in (a.get("event_id"), a.get("agent_id")):
-                    if key is not None:
-                        index[str(key)] = a
+            index = tb.index_agents(data)
 
         # ③ 逐算法富化：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm
         enriched = []
         for item in payload.algorithms:
-            area = tb.full_frame_area() if not item.roiPoints else {
-                "areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": item.roiPoints,
-            }
+            area = tb.roi_area(item.roiPoints)
             agent_llm = None
             target_expand = None
             if (item.kind or "small") == "combined":

@@ -558,6 +558,9 @@ class DeviceService:
         return (True,
                 f"布控任务创建成功（task_id={task_id}，{len(groups)} 个算法仓 / {len(algorithms)} 个算法）",
                 task_id)
+
+    @staticmethod
+    async def list_monitors(client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession] = None):
         """拉取设备 monitor 列表（用于富化任务摘要里的小模型算法名）。
 
         MONITOR_LIST_PATH 未在协议文档核实，属 best-effort；authed_post 已对网络/异常返回 None，
@@ -617,8 +620,7 @@ class DeviceService:
     async def _fetch_channels(client: httpx.AsyncClient, base_url: str, ip: str) -> List[dict]:
         results = []
         try:
-            res1 = await client.post(f"{base_url}/device_access/device_state", json={"offset": 0, "size": 100}) 
-            print(f"evice_access/device_state {res1.json()}")
+            res1 = await client.post(f"{base_url}/device_access/device_state", json={"offset": 0, "size": 100})
             if res1.status_code == 200 and res1.json().get("code") == 0:
                 data_list = res1.json().get("data", []) or []
                 state_map = {str(item.get("device_id")): item.get("state") for item in data_list}

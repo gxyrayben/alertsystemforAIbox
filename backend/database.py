@@ -10,8 +10,8 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"加载 config.json 失败，使用默认配置: {e}")
     return {
         "services_config": {
             "ws": {"enabled": True, "port": "8080", "path": "/api/ws/alarms"},

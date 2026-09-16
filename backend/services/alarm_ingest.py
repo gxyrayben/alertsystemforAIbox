@@ -91,7 +91,10 @@ def save_alarm_images_all(images: dict) -> list:
 
     urls = []
     for img_name, img_data in images.items():
-        file_name = f"{uuid.uuid4()}_{img_name}"
+        # 上传文件名来自设备端 multipart 字段，可能含路径分隔符或 ../，
+        # 仅取末段文件名（兼容 / 与 \），避免越权写入 uploads/ 目录之外（路径穿越）。
+        safe_name = os.path.basename((img_name or "").replace("\\", "/"))
+        file_name = f"{uuid.uuid4()}_{safe_name}"
         with open(os.path.join(save_dir, file_name), "wb") as f:
             f.write(img_data)
         urls.append(f"/uploads/{date_path}/{hour_path}/{file_name}")
