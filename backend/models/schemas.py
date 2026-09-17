@@ -120,6 +120,12 @@ class WarehouseTaskDeploy(BaseModel):
     task_name: str
     algorithms: List[WarehouseAlgorithmItem]
 
+
+class TaskEnableUpdate(BaseModel):
+    """任务列表『是否启用』开关的请求体：切换设备任务的 enable 使能位。"""
+    enable: bool
+
+
 class Alert(BaseModel):
     id: Optional[str] = None
     deviceName: str

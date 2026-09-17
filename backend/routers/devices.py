@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
 from models.db import get_db
-from models.schemas import Device, AgentCreate, AgentTaskDeploy, SmallModelTaskDeploy, CombinedTaskDeploy, WarehouseTaskDeploy
+from models.schemas import (Device, AgentCreate, AgentTaskDeploy, SmallModelTaskDeploy, CombinedTaskDeploy,
+                            WarehouseTaskDeploy, TaskEnableUpdate)
 from models.orm import DeviceORM
 from services.device_service import DeviceService, apply_device_snapshot, _parse_agents
 from services import task_builders as tb
@@ -110,6 +111,97 @@ async def list_device_agents(device_id: str, refresh: bool = Query(True), db: As
     return {"count": len(agents), "agents": agents}
 
 
+def _raise_device_error(msg: str) -> None:
+    """设备侧失败消息 → HTTP 状态码：任务不存在按 404，其余（不可达/返回错误）按 502。"""
+    raise HTTPException(status_code=404 if "未找到任务" in msg else 502, detail=msg)
+
+
+async def _index_device_agents(client: httpx.AsyncClient, device_obj: DeviceORM, db: AsyncSession) -> dict:
+    """实时拉取设备智能体列表并按 event_id/agent_id 建索引，供存在校验与字段兜底；离线/失败报 502。"""
+    data = await DeviceService.list_agents(client, device_obj, db)
+    if data is None:
+        raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达，无法下发任务")
+    if data.get("code") != 0:
+        raise HTTPException(status_code=502, detail=data.get("message", "查询智能体算法失败"))
+    return tb.index_agents(data)
+
+
+def _enrich_agent_items(index: dict, items) -> List[dict]:
+    """智能体任务逐项富化（创建/编辑共用）。
+
+    缺省 prompt/alarm_type 用设备端该智能体自身配置兜底；非描述型强制关闭关键词过滤；
+    空 ROI 用全画面。设备上不存在该智能体时报 400。
+    """
+    enriched = []
+    for item in items:
+        dev_agent = index.get(str(item.event_id))
+        if dev_agent is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"设备上不存在智能体算法「{item.event_tag or item.event_id}」，请先在『智能体资产库』新建。")
+        alarm_type = item.alarm_type or dev_agent.get("alarm_type") or "freeform"
+        is_attr = (alarm_type or "").lower() == "freeform"
+        enriched.append({
+            "event_id": item.event_id,
+            "event_tag": item.event_tag or dev_agent.get("event_tag") or str(item.event_id),
+            "alarm_type": alarm_type,
+            "prompt": item.prompt if item.prompt else dev_agent.get("prompt", ""),
+            "alarm_condition": item.alarm_condition,
+            "filter_enable": bool(item.filter_enable) if is_attr else False,
+            "filter_keywords": item.filter_keywords if is_attr else "",
+            "area": tb.roi_area(item.roiPoints),
+        })
+    return enriched
+
+
+async def _enrich_warehouse_algorithms(
+    client: httpx.AsyncClient, device_obj: DeviceORM, db: AsyncSession, algorithms
+) -> List[dict]:
+    """算法仓多算法逐项富化（创建/编辑共用）：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm。
+
+    仅当存在『小+大』算法时才拉设备智能体列表（纯小模型无需触网）；智能体不存在报 400。
+    """
+    has_combined = any((a.kind or "small") == "combined" for a in algorithms)
+    index = await _index_device_agents(client, device_obj, db) if has_combined else {}
+
+    enriched = []
+    for item in algorithms:
+        agent_llm = None
+        target_expand = None
+        if (item.kind or "small") == "combined":
+            dev_agent = index.get(str(item.agent_id))
+            if dev_agent is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"设备上不存在智能体算法「{item.event_tag or item.agent_id}」，请先在『智能体资产库』新建。")
+            agent_llm = tb.build_agent_llm_param(
+                {
+                    **dev_agent,
+                    "event_id": item.agent_id,
+                    "event_tag": item.event_tag or dev_agent.get("event_tag") or str(item.agent_id),
+                    "alarm_type": item.alarm_type or dev_agent.get("alarm_type") or "freeform",
+                },
+                prompt=item.prompt or None,
+                alarm_condition=item.alarm_condition,
+            )
+            target_expand = item.target_expand
+        enriched.append({
+            "event_type": item.event_type,
+            "algo_cabin_name": item.algo_cabin_name,
+            "version": item.version,
+            "area": tb.roi_area(item.roiPoints),
+            "target_types": item.target_types,
+            "threshold": item.threshold,
+            "target_max": item.target_max,
+            "target_min": item.target_min,
+            "duration": item.duration,
+            "cooldown": item.cooldown,
+            "agent_llm": agent_llm,
+            "target_expand": target_expand,
+        })
+    return enriched
+
+
 @router.post("/{device_id}/deploy/agent-task")
 async def deploy_agent_task(device_id: str, payload: AgentTaskDeploy, db: AsyncSession = Depends(get_db)):
     """下发【纯大模型智能体任务】(agent_real_task)，最多关联 4 个智能体，每个智能体单 ROI。
@@ -123,34 +215,8 @@ async def deploy_agent_task(device_id: str, payload: AgentTaskDeploy, db: AsyncS
         raise HTTPException(status_code=400, detail="智能体任务需关联 1~4 个智能体算法")
 
     async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
-        data = await DeviceService.list_agents(client, device_obj, db)
-        if data is None:
-            raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达，无法下发任务")
-        if data.get("code") != 0:
-            raise HTTPException(status_code=502, detail=data.get("message", "查询智能体算法失败"))
-        # 按 event_id / agent_id 建索引，供存在校验与字段兜底
-        index = tb.index_agents(data)
-
-        enriched = []
-        for item in payload.agents:
-            dev_agent = index.get(str(item.event_id))
-            if dev_agent is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"设备上不存在智能体算法「{item.event_tag or item.event_id}」，请先在『智能体资产库』新建。")
-            alarm_type = item.alarm_type or dev_agent.get("alarm_type") or "freeform"
-            is_attr = (alarm_type or "").lower() == "freeform"
-            area = tb.roi_area(item.roiPoints)
-            enriched.append({
-                "event_id": item.event_id,
-                "event_tag": item.event_tag or dev_agent.get("event_tag") or str(item.event_id),
-                "alarm_type": alarm_type,
-                "prompt": item.prompt if item.prompt else dev_agent.get("prompt", ""),
-                "alarm_condition": item.alarm_condition,
-                "filter_enable": bool(item.filter_enable) if is_attr else False,
-                "filter_keywords": item.filter_keywords if is_attr else "",
-                "area": area,
-            })
+        index = await _index_device_agents(client, device_obj, db)
+        enriched = _enrich_agent_items(index, payload.agents)
 
         task_payload = tb.build_agent_real_task_payload(
             payload.task_name, payload.channel_device_id, enriched,
@@ -272,55 +338,9 @@ async def deploy_warehouse_task(device_id: str, payload: WarehouseTaskDeploy, db
     if errors:
         raise HTTPException(status_code=400, detail="；".join(errors))
 
-    has_combined = any((a.kind or "small") == "combined" for a in payload.algorithms)
     async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
-        # ② 仅当存在『小+大』算法时才拉设备智能体列表建索引（纯小模型无需触网）
-        index = {}
-        if has_combined:
-            data = await DeviceService.list_agents(client, device_obj, db)
-            if data is None:
-                raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达，无法下发任务")
-            if data.get("code") != 0:
-                raise HTTPException(status_code=502, detail=data.get("message", "查询智能体算法失败"))
-            index = tb.index_agents(data)
-
-        # ③ 逐算法富化：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm
-        enriched = []
-        for item in payload.algorithms:
-            area = tb.roi_area(item.roiPoints)
-            agent_llm = None
-            target_expand = None
-            if (item.kind or "small") == "combined":
-                dev_agent = index.get(str(item.agent_id))
-                if dev_agent is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"设备上不存在智能体算法「{item.event_tag or item.agent_id}」，请先在『智能体资产库』新建。")
-                agent_llm = tb.build_agent_llm_param(
-                    {
-                        **dev_agent,
-                        "event_id": item.agent_id,
-                        "event_tag": item.event_tag or dev_agent.get("event_tag") or str(item.agent_id),
-                        "alarm_type": item.alarm_type or dev_agent.get("alarm_type") or "freeform",
-                    },
-                    prompt=item.prompt or None,
-                    alarm_condition=item.alarm_condition,
-                )
-                target_expand = item.target_expand
-            enriched.append({
-                "event_type": item.event_type,
-                "algo_cabin_name": item.algo_cabin_name,
-                "version": item.version,
-                "area": area,
-                "target_types": item.target_types,
-                "threshold": item.threshold,
-                "target_max": item.target_max,
-                "target_min": item.target_min,
-                "duration": item.duration,
-                "cooldown": item.cooldown,
-                "agent_llm": agent_llm,
-                "target_expand": target_expand,
-            })
+        # ② 逐算法富化：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm（与编辑保存共用）
+        enriched = await _enrich_warehouse_algorithms(client, device_obj, db, payload.algorithms)
 
         ok, msg, task_id = await DeviceService.deploy_warehouse_task_multi(
             client, device_obj, db,
@@ -332,6 +352,79 @@ async def deploy_warehouse_task(device_id: str, payload: WarehouseTaskDeploy, db
         raise HTTPException(status_code=502, detail=msg)
     await _resnapshot(device_obj, db)
     return {"success": True, "task_id": task_id, "message": msg}
+
+
+@router.put("/{device_id}/tasks/{task_id}/agent-task")
+async def update_agent_task(device_id: str, task_id: str, payload: AgentTaskDeploy,
+                            db: AsyncSession = Depends(get_db)):
+    """就地更新【纯大模型智能体任务】(agent_real_task)：任务列表『编辑』保存走此端点。
+
+    与创建同一套校验/富化(_index_device_agents + _enrich_agent_items)，区别是带上原 task_id
+    走 PUT /intelli_manager/task 覆盖更新（不会新建出重复任务）。
+    enable 使能位保持不变（启用/停用请用 enable 端点）。成功后 best-effort 重刷快照，使列表与回填即时一致。
+    """
+    device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
+    if not (1 <= len(payload.agents) <= 4):
+        raise HTTPException(status_code=400, detail="智能体任务需关联 1~4 个智能体算法")
+
+    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+        index = await _index_device_agents(client, device_obj, db)
+        enriched = _enrich_agent_items(index, payload.agents)
+        ok, msg = await DeviceService.update_agent_real_task(
+            client, device_obj, db,
+            task_id=task_id,
+            task_name=payload.task_name,
+            channel_device_id=payload.channel_device_id,
+            agents=enriched,
+            analysis_interval=payload.analysis_interval,
+        )
+    if not ok:
+        _raise_device_error(msg)
+    await _resnapshot(device_obj, db)
+    return {"success": True, "task_id": task_id, "message": msg}
+
+
+@router.put("/{device_id}/tasks/{task_id}/warehouse-task")
+async def update_warehouse_task(device_id: str, task_id: str, payload: WarehouseTaskDeploy,
+                                db: AsyncSession = Depends(get_db)):
+    """就地更新【算法仓多算法任务】(single_point_task + N 条 monitor)：任务列表『编辑』保存走此端点。
+
+    与创建共用参数校验(task_validation)与富化(_enrich_warehouse_algorithms)；保存时按算法仓
+    用原 monitor_id 覆盖重下规则，编辑中被移除的算法仓降级停用（设备无删除接口）。
+    """
+    device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
+
+    errors = task_validation.validate_warehouse_deploy(payload)
+    if errors:
+        raise HTTPException(status_code=400, detail="；".join(errors))
+
+    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+        enriched = await _enrich_warehouse_algorithms(client, device_obj, db, payload.algorithms)
+        ok, msg = await DeviceService.update_warehouse_task_multi(
+            client, device_obj, db,
+            task_id=task_id,
+            task_name=payload.task_name,
+            channel_device_id=payload.channel_device_id,
+            algorithms=enriched,
+        )
+    if not ok:
+        _raise_device_error(msg)
+    await _resnapshot(device_obj, db)
+    return {"success": True, "task_id": task_id, "message": msg}
+
+
+@router.put("/{device_id}/tasks/{task_id}/enable")
+async def set_device_task_enable(device_id: str, task_id: str, payload: TaskEnableUpdate,
+                                 db: AsyncSession = Depends(get_db)):
+    """任务列表『是否启用』开关：切换设备任务 enable，并同步其名下各算法仓 monitor 的使能位。"""
+    device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
+    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+        ok, msg = await DeviceService.set_task_enable(
+            client, device_obj, db, task_id=task_id, enable=payload.enable)
+    if not ok:
+        _raise_device_error(msg)
+    await _resnapshot(device_obj, db)
+    return {"success": True, "task_id": task_id, "enable": payload.enable, "message": msg}
 
 
 @router.post("/{device_id}/agents")

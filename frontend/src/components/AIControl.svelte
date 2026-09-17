@@ -1,7 +1,7 @@
 <script>
     import { onMount, tick } from 'svelte';
-    import { showToast, switchTab, chatRequest, selectedDevice } from '../lib/controlStore.js';
-    import { apiPost, apiGet, apiDelete, API_BASE } from '../lib/api.js';
+    import { showToast, switchTab, chatRequest, selectedDevice, loadDevices } from '../lib/controlStore.js';
+    import { apiPost, apiGet, apiPut, apiDelete, API_BASE } from '../lib/api.js';
 
     const LS_CONV_KEY = 'aiChatConvId';
 
@@ -42,6 +42,7 @@
         event_type: '', algo_cabin_name: '',    // 算法标识（propose/对话填充；查看态无来源，靠 deploy() guard 拦截）
         // 智能体任务（agent_real_task）专用：
         taskMode: 'smallmodel',   // 'agent' | 'smallmodel' | 'combined'
+        task_id: null,            // 非空=正在编辑设备上的既有任务（保存走 PUT 真更新）；null=新建下发
         channel_device_id: null,
         device_id: null,
         agents: [],               // ≤4：{event_id,event_tag,alarm_type,prompt,alarm_condition,filter_enable,filter_keywords,roiId}
@@ -75,6 +76,10 @@
     let availableAgents = []; // 设备可选智能体算法（供智能体任务下拉，最多选 4）
     let availableAlgorithms = []; // 设备可选小模型算法目录（供小模型/小+大任务 Step1 多选）
     let wizardStep = 1;       // 右侧画板三步向导当前步：1 任务信息 / 2 ROI绘制 / 3 详情参数
+    let panelView = 'list';   // 右侧面板视图：list=任务列表（默认）/ editor=布控编辑器（三步向导）
+    let togglingTaskId = '';  // 正在切换「是否启用」的任务ID（防重复点击）
+    let refreshingTasks = false;  // 正在从设备同步任务列表
+    let listNonce = 0;        // 列表重绘计数：开关切换失败时用它把 DOM 复选框还原成真实值
     const WIZARD_STEPS = [
         { n: 1, ord: '第一步', label: '任务信息与算法选型' },
         { n: 2, ord: '第二步', label: 'ROI 绘制与算法关联' },
@@ -109,6 +114,41 @@
         }
         return out;
     })();
+
+    // 任务列表数据源：设备快照 device_tasks（同步设备时由后端烘焙，含 task_status/task_enable/algorithms_label/detail）
+    $: deviceTasks = (() => {
+        let list = [];
+        try { list = JSON.parse($selectedDevice?.device_tasks || '[]'); } catch (e) { list = []; }
+        return Array.isArray(list) ? list : [];
+    })();
+    // 编辑态：task_id 非空 ⇒ 保存走真更新（PUT），按钮文案与提示同步切换
+    $: isEditing = !!config.task_id;
+    // 小+大协同任务专属参数（扩图倍数 / 二次大模型 / 裁切送检预览）仅该类型展示
+    $: isCombinedTask = config.taskMode === 'combined';
+    // 三阈值收敛为「检测目标 + 该目标阈值」一组控件：面板仍按目标写回对应字段（与后端 _thresh_key 对齐）
+    $: threshKey = config.yoloTarget === 'vehicle' ? 'yoloVehicleThresh'
+        : config.yoloTarget === 'human' ? 'yoloHumanThresh' : 'yoloNonMotorThresh';
+
+    // 设备任务类型 → 列表展示名（single_point_task 为纯小模型任务的设备原始类型名）
+    const TASK_TYPE_LABELS = {
+        'agent_real_task': '大模型任务',
+        'small_task': '小模型任务',
+        'single_point_task': '小模型任务',
+        'small_and_agent_task': '大小协同任务'
+    };
+    const taskTypeLabel = (t) => TASK_TYPE_LABELS[t] || t || '—';
+    const TASK_STATUS_CLASS = {
+        '正常': 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60',
+        '异常': 'bg-rose-950/60 text-rose-300 border-rose-700/60',
+        '未启用': 'bg-slate-900 text-slate-400 border-slate-700'
+    };
+    const taskStatusClass = (st) => TASK_STATUS_CLASS[st] || TASK_STATUS_CLASS['未启用'];
+
+    // 阈值滑杆：只改「当前检测目标」对应的那一个阈值字段，其余字段保持设备原值（回填 round-trip 不丢）
+    function setThresh(v) {
+        const num = Math.min(0.9, Math.max(0.1, Number(v) || 0.1));
+        config = { ...config, [threshKey]: +num.toFixed(2) };
+    }
 
     const presets = [
         { icon: '📹', text: '当前设备接入了多少个视频流？请用表格列出所有通道。' },
@@ -164,6 +204,7 @@
         availableAgents = [];
         availableAlgorithms = [];
         wizardStep = 1;
+        panelView = 'list';
         if (!silent) showToast('已开启新对话。', 'info');
     }
 
@@ -563,10 +604,12 @@
     }
 
     function applyConfig(data) {
-        config = { ...config, ...data };
+        // 跨标签「对话级微调」灌参：视作新建，清掉上一次编辑残留的 task_id
+        config = { ...config, ...data, task_id: data?.task_id ?? null };
         templateApplied = false;
         monitorActive = true;
         wizardStep = 1;
+        panelView = 'editor';
         showToast('双级级联配置参数填充，裁切扩图区域渲染成功！', 'success');
         scrollToBottom();
     }
@@ -643,6 +686,9 @@
             config = normalizeWarehouseConfig(config, proposal);
             await loadWarehouseCatalogs(proposal.available_algorithms);
         }
+        // 对话草案=新建：清掉上一次编辑残留的 task_id，避免把草案误存进既有任务
+        config = { ...config, task_id: proposal.task_id ?? null };
+        panelView = 'editor';
         // fromTemplate=对话选模板(路径 c)：免 ROI 门禁；普通 propose 草案：需画 ROI 才放行
         templateApplied = !!proposal.fromTemplate;
         monitorActive = true;
@@ -653,7 +699,7 @@
         await scrollToBottom();
     }
 
-    // 点击任务表「查看」：把该任务的真实参数(row.detail)回填到右侧控制面板，
+    // 点击任务列表 / 对话表格「编辑」：把该任务的真实参数(row.detail)回填到右侧控制面板，
     // 并在视频区载入设备最新报警大图（无则占位图）。detail 由后端在同步设备时烘焙进快照，离线仍可用。
     async function viewTask(row) {
         const d = row.detail || {};
@@ -669,7 +715,14 @@
             config = normalizeWarehouseConfig(defaultConfig, d);
             await loadWarehouseCatalogs();  // 预热算法/智能体目录，便于 Step1 增删换算法
         }
-        // 查看态非模板；真实 ROI 已随算法项带回（全屏项 useFullFrame=true / 自定义项有点），门禁自然放行
+        // detail 由后端烘焙，已带 task_id/channel_device_id ⇒ 本次保存直接更新该任务；老快照缺失时回退列表行的值
+        config = {
+            ...config,
+            task_id: config.task_id || d.task_id || row.task_id || null,
+            channel_device_id: config.channel_device_id ?? d.channel_device_id ?? row.camera_device_id ?? null
+        };
+        panelView = 'editor';
+        // 编辑态非模板；真实 ROI 已随算法项带回（全屏项 useFullFrame=true / 自定义项有点），门禁自然放行
         templateApplied = false;
         monitorActive = true;
         wizardStep = 1;
@@ -678,6 +731,91 @@
         pushSystemTip(d.name || row.task_name || '布控任务');
         showToast(`已载入任务「${d.name || row.task_name || row.task_id}」的真实参数。`, 'success');
         await scrollToBottom();
+    }
+
+    // 列表「编辑」：复用 viewTask 的回填逻辑（同一套 detail → 面板映射），viewTask 内部已切到编辑器视图
+    async function editTask(row) {
+        await viewTask(row);
+    }
+
+    // 从设备重新拉取快照（任务列表数据源），再刷新全局设备 store
+    async function refreshTaskList() {
+        const device = $selectedDevice;
+        if (!device?.id) { showToast('请先在顶栏选择一个设备。', 'error'); return; }
+        refreshingTasks = true;
+        try {
+            await apiPost(`/devices/${device.id}/fetch`);
+            await loadDevices();
+            showToast('已从设备同步最新任务列表。', 'success');
+        } catch (e) {
+            showToast(e?.detail || '同步设备任务失败，请检查设备在线状态。', 'error');
+        } finally {
+            refreshingTasks = false;
+        }
+    }
+
+    // 「是否启用」开关：PUT 任务 enable（设备无硬删除接口，停用即降级），成功后刷新快照
+    async function toggleTaskEnable(row, enable) {
+        const device = $selectedDevice;
+        if (!device?.id) { showToast('请先在顶栏选择一个设备。', 'error'); return; }
+        togglingTaskId = String(row.task_id);
+        try {
+            await apiPut(`/devices/${device.id}/tasks/${row.task_id}/enable`, { enable });
+            showToast(`任务「${row.task_name || row.task_id}」已${enable ? '启用' : '停用'}。`, 'success');
+            await loadDevices();
+        } catch (e) {
+            showToast(e?.detail || '切换启用状态失败，请检查设备在线状态。', 'error');
+            listNonce += 1;   // 复选框已被点翻：重建列表行，还原为设备真实值
+        } finally {
+            togglingTaskId = '';
+        }
+    }
+
+    // 新建布控任务：清空面板（task_id=null ⇒ 保存走新建下发），默认小模型任务 + 首个通道
+    async function startNewTask() {
+        config = { ...defaultConfig, agents: [], algorithms: [], rois: [{ id: 'full', name: '全屏检测', points: [] }] };
+        const ch = channelOptions[0];
+        if (ch) config.channel_device_id = ch.device_id;
+        templateApplied = false;
+        monitorActive = true;
+        roiDrawActive = true;
+        wizardStep = 1;
+        panelView = 'editor';
+        sceneImage = null;
+        await loadWarehouseCatalogs();
+        if (!(config.algorithms || []).length) addAlgorithmSlot();
+        await loadSceneImage(null);
+        showToast('已进入新建布控任务：请选择任务类型、通道与算法。', 'info');
+    }
+
+    // 新建时切换任务类型：不同类型的参数集不同，切换即补齐该类型所需的槽位与目录
+    async function changeTaskMode(mode) {
+        if (config.taskMode === mode) return;
+        config = { ...config, taskMode: mode };
+        if (mode === 'agent') {
+            if (!availableAgents.length) await loadAvailableAgents();
+            if (!(config.agents || []).length) addAgentSlot();
+        } else {
+            await loadWarehouseCatalogs();
+            config.algorithms = (config.algorithms || []).map((a) => ({ ...a, kind: mode === 'combined' ? 'combined' : 'small' }));
+            if (!config.algorithms.length) addAlgorithmSlot();
+        }
+        wizardStep = 1;
+    }
+
+    // 返回任务列表（保留面板参数，可再次进入继续编辑）
+    function backToList() {
+        panelView = 'list';
+    }
+
+    // 编辑保存成功后：刷新设备快照并回到列表
+    async function afterTaskSaved() {
+        await loadDevices();
+        config = { ...defaultConfig };
+        monitorActive = false;
+        roiDrawActive = false;
+        wizardStep = 1;
+        panelView = 'list';
     }
 
     function pushSystemTip(taskName) {
@@ -789,9 +927,9 @@
                 version: item.version || config.version || 'V2.0.0',
                 target_types,
                 threshold: Number(threshold),
-                // 面板「最大/最小目标限制」是 0~1 滑杆，设备 targetMax/targetMin 为整数目标数，取整下发。
-                target_max: Math.round(Number(p.maxTarget)),
-                target_min: Math.round(Number(p.minTarget)),
+                // 面板「最大/最小目标限制」为整数目标个数（对应设备 targetMax/targetMin），兜底取整下发。
+                target_max: Math.max(0, Math.round(Number(p.maxTarget) || 0)),
+                target_min: Math.max(0, Math.round(Number(p.minTarget) || 0)),
                 duration: Math.round(Number(p.intrusionDuration)),
                 cooldown: Math.round(Number(p.alarmInterval)),
                 roiPoints
@@ -822,13 +960,22 @@
             task_name: config.name,
             algorithms: items
         };
+        // 编辑既有任务(task_id 非空)走 PUT 真更新：任务名/通道 PUT task，各仓 monitor 以原 monitor_id 覆盖规则
+        const editing = !!config.task_id;
         try {
-            const res = await apiPost(`/devices/${device.id}/deploy/warehouse-task`, body);
+            const res = editing
+                ? await apiPut(`/devices/${device.id}/tasks/${config.task_id}/warehouse-task`, body)
+                : await apiPost(`/devices/${device.id}/deploy/warehouse-task`, body);
             const hasCombined = items.some((a) => a.kind === 'combined');
-            showToast(`🚀 ${hasCombined ? '小+大级联' : '纯小模型'}布控任务「${config.name}」已下发（${items.length} 个算法，task_id=${res.task_id}）。`, 'success');
-            setTimeout(() => switchTab('taskops'), 1000);
+            if (editing) {
+                showToast(`✅ 任务「${config.name}」已更新（${items.length} 个算法，task_id=${res.task_id}）。`, 'success');
+                await afterTaskSaved();
+            } else {
+                showToast(`🚀 ${hasCombined ? '小+大级联' : '纯小模型'}布控任务「${config.name}」已下发（${items.length} 个算法，task_id=${res.task_id}）。`, 'success');
+                setTimeout(() => switchTab('taskops'), 1000);
+            }
         } catch (e) {
-            showToast(e?.detail || '布控任务下发失败，请检查设备在线状态与算法授权。', 'error');
+            showToast(e?.detail || (editing ? '任务更新失败，请检查设备在线状态与算法授权。' : '布控任务下发失败，请检查设备在线状态与算法授权。'), 'error');
         }
     }
 
@@ -860,12 +1007,20 @@
                 roiPoints: (config.rois.find((r) => r.id === a.roiId)?.points) || []
             }))
         };
+        const editing = !!config.task_id;
         try {
-            const res = await apiPost(`/devices/${device.id}/deploy/agent-task`, body);
-            showToast(`🚀 智能体任务「${config.name}」已下发到设备（task_id=${res.task_id}）。`, 'success');
-            setTimeout(() => switchTab('taskops'), 1000);
+            const res = editing
+                ? await apiPut(`/devices/${device.id}/tasks/${config.task_id}/agent-task`, body)
+                : await apiPost(`/devices/${device.id}/deploy/agent-task`, body);
+            if (editing) {
+                showToast(`✅ 智能体任务「${config.name}」已更新（task_id=${res.task_id}）。`, 'success');
+                await afterTaskSaved();
+            } else {
+                showToast(`🚀 智能体任务「${config.name}」已下发到设备（task_id=${res.task_id}）。`, 'success');
+                setTimeout(() => switchTab('taskops'), 1000);
+            }
         } catch (e) {
-            showToast(e?.detail || '智能体任务下发失败，请检查设备在线状态与智能体算法。', 'error');
+            showToast(e?.detail || (editing ? '智能体任务更新失败，请检查设备在线状态与智能体算法。' : '智能体任务下发失败，请检查设备在线状态与智能体算法。'), 'error');
         }
     }
 
@@ -927,6 +1082,8 @@
             config = normalizeWarehouseConfig(defaultConfig, d);
             await loadWarehouseCatalogs();  // 预热算法/智能体目录，便于 Step1 增删换算法
         }
+        config = { ...config, task_id: null };   // 模板=新建：忽略模板快照里可能残留的 task_id
+        panelView = 'editor';
         templateApplied = true;   // 路径(b) 面板选模板：跳过强制 ROI 门禁
         monitorActive = true;
         wizardStep = 1;
@@ -1087,7 +1244,7 @@
                                                                     <td class="px-2.5 py-1.5 align-top whitespace-nowrap">
                                                                         <button on:click={() => viewTask(row)}
                                                                                 class="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-600/40 transition-all">
-                                                                            <i class="fa-solid fa-eye mr-1"></i>查看
+                                                                            <i class="fa-solid fa-pen-to-square mr-1"></i>编辑
                                                                         </button>
                                                                     </td>
                                                                 {:else if col.key === 'algorithms'}
@@ -1167,16 +1324,108 @@
         </div>
     </div>
 
-    <!-- 右侧：画布 / 参数面板 -->
+    <!-- 右侧：任务列表（默认） / 布控编辑器 -->
     <div class="flex-1 flex flex-col h-full bg-slate-900 overflow-y-auto p-5">
+        {#if panelView === 'list'}
+        <!-- 任务列表：数据源为设备快照 device_tasks（同步设备时烘焙，设备离线也可查看/编辑参数） -->
+        <div class="mb-5 bg-slate-950/60 p-4 rounded-2xl border border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center space-x-3">
+                <div class="bg-indigo-500/10 text-indigo-400 px-2.5 py-1.5 rounded-lg border border-indigo-500/20 text-xs font-bold">布控任务列表</div>
+                <span class="text-[11px] text-slate-400">设备：{$selectedDevice?.name || '未选择'} · 共 {deviceTasks.length} 个任务</span>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+                <button on:click={refreshTaskList} disabled={refreshingTasks} title="从设备重新拉取任务/算法快照"
+                        class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center transition-all border border-slate-700 disabled:opacity-50">
+                    <i class="fa-solid fa-rotate mr-1.5 {refreshingTasks ? 'animate-spin' : ''}"></i>{refreshingTasks ? '同步中…' : '同步设备任务'}
+                </button>
+                <button on:click={startNewTask} class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center transition-all shadow-md shadow-indigo-500/25">
+                    <i class="fa-solid fa-plus mr-1.5"></i>新建布控任务
+                </button>
+            </div>
+        </div>
+
+        <div class="bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse text-[11px]">
+                    <thead class="bg-slate-900/60 text-[10px] text-slate-400">
+                        <tr>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap">任务ID</th>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap">任务名称</th>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap">任务类型</th>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap">通道名称</th>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap">任务状态</th>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap">是否启用</th>
+                            <th class="px-3 py-2.5 font-medium">关联智能体/算法</th>
+                            <th class="px-3 py-2.5 font-medium whitespace-nowrap text-right">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800">
+                        {#key listNonce}
+                            {#each deviceTasks as row, ri (row.task_id ?? ri)}
+                                <tr class="hover:bg-slate-900/40 transition-colors">
+                                    <td class="px-3 py-2.5 font-mono text-slate-400 whitespace-nowrap">{row.task_id ?? '—'}</td>
+                                    <td class="px-3 py-2.5 text-slate-200 font-medium break-all max-w-[180px]">{row.task_name || '—'}</td>
+                                    <td class="px-3 py-2.5 whitespace-nowrap">
+                                        <span class="px-1.5 py-0.5 rounded border text-[10px] font-bold {row.task_type === 'agent_real_task' ? 'bg-purple-950/60 text-purple-300 border-purple-700/60' : row.task_type === 'small_and_agent_task' ? 'bg-indigo-950/60 text-indigo-300 border-indigo-700/60' : 'bg-amber-950/60 text-amber-300 border-amber-700/60'}">{taskTypeLabel(row.task_type)}</span>
+                                    </td>
+                                    <td class="px-3 py-2.5 text-slate-300 break-all max-w-[140px]">{row.camera_device_name || row.camera_device_id || '—'}</td>
+                                    <td class="px-3 py-2.5 whitespace-nowrap">
+                                        <span class="px-1.5 py-0.5 rounded border text-[10px] font-bold {taskStatusClass(row.task_status)}">{row.task_status || '—'}</span>
+                                    </td>
+                                    <td class="px-3 py-2.5 whitespace-nowrap">
+                                        <label class="inline-flex items-center cursor-pointer" title={row.task_enable ? '点击停用该任务' : '点击启用该任务'}>
+                                            <input type="checkbox" class="sr-only peer" checked={!!row.task_enable}
+                                                   disabled={togglingTaskId === String(row.task_id)}
+                                                   on:change={(e) => toggleTaskEnable(row, e.currentTarget.checked)} />
+                                            <span class="w-9 h-5 rounded-full bg-slate-700 peer-checked:bg-emerald-600 relative transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></span>
+                                        </label>
+                                    </td>
+                                    <td class="px-3 py-2.5 text-slate-300 break-all max-w-[220px]">{row.algorithms_label || (Array.isArray(row.algorithms) ? row.algorithms.join('、') : row.algorithms) || '—'}</td>
+                                    <td class="px-3 py-2.5 whitespace-nowrap text-right">
+                                        <button on:click={() => editTask(row)} title="按任务类型载入其真实参数并编辑"
+                                                class="text-[11px] px-2.5 py-1 rounded-md bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-600/40 transition-all">
+                                            <i class="fa-solid fa-pen-to-square mr-1"></i>编辑
+                                        </button>
+                                    </td>
+                                </tr>
+                            {:else}
+                                <tr>
+                                    <td colspan="8" class="px-3 py-10 text-center text-[11px] text-slate-500">
+                                        <i class="fa-solid fa-inbox text-2xl text-slate-700 block mb-2"></i>
+                                        该设备暂无布控任务：点右上「同步设备任务」从设备拉取，或「新建布控任务」直接布控。
+                                    </td>
+                                </tr>
+                            {/each}
+                        {/key}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="text-[10px] text-slate-500 mt-3 leading-relaxed">
+            <i class="fa-regular fa-lightbulb mr-1 text-amber-400"></i>
+            点「编辑」按任务类型载入真实参数：大模型任务只展示分析间隔与智能体 Prompt；小模型任务只展示端侧检测参数（检测目标/阈值/目标个数/时长/冷却）；大小协同任务额外展示目标扩图倍数与二次大模型。
+            关闭「是否启用」即停用该任务及其全部 monitor（设备无硬删除接口，停用为降级手段）。
+        </p>
+        {:else}
         <div class="mb-5 bg-slate-950/60 p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
             <div class="flex items-center space-x-3">
-                <div class="bg-indigo-500/10 text-indigo-400 px-2.5 py-1.5 rounded-lg border border-indigo-500/20 text-xs font-bold">双级级联管道</div>
+                <div class="bg-indigo-500/10 text-indigo-400 px-2.5 py-1.5 rounded-lg border border-indigo-500/20 text-xs font-bold">{isAgentTask ? '大模型直推管道' : isCombinedTask ? '双级级联管道' : '小模型端侧管道'}</div>
+                <!-- 管道示意与任务类型一致：大模型=按间隔抽帧直送 VLM；小模型=端侧算法直接出报警；小+大=检测命中后裁图复核 -->
                 <div class="flex items-center text-[11px] text-slate-400 flex-wrap gap-y-1">
-                    <span class="flow-arrow font-medium">1. 边缘流</span>
-                    <span class="flow-arrow text-amber-400 font-bold">2. 小模型检测 (阈值过滤/ROI)</span>
-                    <span class="flow-arrow text-blue-400 font-bold">3. 动态扩图裁切</span>
-                    <span class="flow-arrow text-purple-400 font-bold">4. VLM Agent 深度识别</span>
+                    {#if isAgentTask}
+                        <span class="flow-arrow font-medium">1. 边缘流</span>
+                        <span class="flow-arrow text-slate-300 font-bold">2. 按间隔抽帧 ({config.interval}s)</span>
+                        <span class="flow-arrow text-purple-400 font-bold">3. VLM Agent 整帧/ROI 识别</span>
+                    {:else if isCombinedTask}
+                        <span class="flow-arrow font-medium">1. 边缘流</span>
+                        <span class="flow-arrow text-amber-400 font-bold">2. 小模型检测 (阈值过滤/ROI)</span>
+                        <span class="flow-arrow text-blue-400 font-bold">3. 动态扩图裁切</span>
+                        <span class="flow-arrow text-purple-400 font-bold">4. VLM Agent 深度识别</span>
+                    {:else}
+                        <span class="flow-arrow font-medium">1. 边缘流</span>
+                        <span class="flow-arrow text-amber-400 font-bold">2. 小模型实时检测 (阈值过滤/ROI)</span>
+                        <span class="flow-arrow text-emerald-400 font-bold">3. 端侧直接产出报警</span>
+                    {/if}
                 </div>
             </div>
             <div class="flex items-center gap-2 shrink-0">
@@ -1194,9 +1443,12 @@
                         <i class="fa-solid fa-bookmark mr-1.5"></i>保存为模板
                     </button>
                     <button on:click={deploy} class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center transition-all shadow-md shadow-indigo-500/25 shrink-0">
-                        <i class="fa-solid fa-rocket mr-2 animate-bounce"></i>{isAgentTask ? '一键部署智能体任务' : '一键部署双级任务'}
+                        <i class="fa-solid {isEditing ? 'fa-floppy-disk' : 'fa-rocket animate-bounce'} mr-2"></i>{isEditing ? '保存修改' : (isAgentTask ? '一键部署智能体任务' : isCombinedTask ? '一键部署小+大协同任务' : '一键部署小模型任务')}
                     </button>
                 {/if}
+                <button on:click={backToList} title="返回布控任务列表" class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center transition-all border border-slate-700 shrink-0">
+                    <i class="fa-solid fa-list-ul mr-1.5"></i>任务列表
+                </button>
             </div>
         </div>
 
@@ -1243,7 +1495,22 @@
                         <span class="bg-indigo-600 text-white p-1 rounded mr-2"><i class="fa-solid fa-circle-info text-xs"></i></span>
                         第一步 · 任务信息
                         <span class="ml-2 text-[10px] font-normal text-slate-500">{isAgentTask ? '大模型智能体任务' : (config.taskMode === 'combined' ? '小+大协同任务' : '小模型任务')}</span>
+                        {#if isEditing}
+                            <span class="ml-2 text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-800/60">编辑中 · task_id={config.task_id}</span>
+                        {/if}
                     </h3>
+                    {#if !isEditing}
+                        <!-- 新建任务：任务类型决定后续可配置的参数集（编辑既有任务时类型由设备侧决定，不可切换） -->
+                        <div>
+                            <label class="block text-[10px] text-slate-400 mb-1">任务类型（决定第三步展示哪些参数）</label>
+                            <div class="flex flex-wrap gap-1.5">
+                                {#each [{ v: 'smallmodel', t: '小模型任务' }, { v: 'agent', t: '大模型任务' }, { v: 'combined', t: '大小协同任务' }] as m}
+                                    <button type="button" on:click={() => changeTaskMode(m.v)}
+                                            class="px-3 py-1.5 rounded-lg border text-[11px] font-bold transition-colors {config.taskMode === m.v ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-200' : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-indigo-500/30'}">{m.t}</button>
+                                {/each}
+                            </div>
+                        </div>
+                    {/if}
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <div>
                             <label class="block text-[10px] text-slate-400 mb-1">任务名称（模型自动生成，可修改）</label>
@@ -1365,7 +1632,7 @@
                 </div>
             {/if}
 
-            {#if !monitorActive || wizardStep === 2 || (wizardStep === 3 && !isAgentTask)}
+            {#if !monitorActive || wizardStep === 2 || (wizardStep === 3 && isCombinedTask)}
             <!-- ② ROI 绘制：视频/图片画布（未激活时为占位提示） -->
             <div class="space-y-4">
                 {#if !monitorActive || wizardStep === 2}
@@ -1424,8 +1691,12 @@
                                     <i class="fa-solid fa-draw-polygon mr-1"></i>点击画点绘制检测区（已 {currentRoiPoints.length} 点）{#if isAgentTask && activeAgent}· 当前：{activeAgent.event_tag || '智能体'}{:else if !isAgentTask && activeAlgorithm}· 当前：{activeAlgorithm.event_type || '算法'}{/if}
                                 </div>
                             {/if}
-                            {#if !isAgentTask}
+                            {#if isCombinedTask}
                                 <div class="absolute bottom-2 right-2 bg-emerald-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow flex items-center"><i class="fa-solid fa-crop mr-1"></i> Agent裁图区 (上扩{config.cropUp} / 下{config.cropDown})</div>
+                            {:else if isAgentTask}
+                                <div class="absolute bottom-2 right-2 bg-purple-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow flex items-center"><i class="fa-solid fa-brain mr-1"></i> 大模型整帧/ROI 送检（间隔 {config.interval}s）</div>
+                            {:else}
+                                <div class="absolute bottom-2 right-2 bg-amber-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow flex items-center"><i class="fa-solid fa-microchip mr-1"></i> 端侧小模型实时检测（无裁图送检）</div>
                             {/if}
                         {/if}
                     </div>
@@ -1545,7 +1816,7 @@
                 {/if}
 
                 <!-- 扩图预览（随第③步详情参数一起展示：与「目标扩图倍数」配置同屏） -->
-                {#if monitorActive && wizardStep === 3 && !isAgentTask}
+                {#if monitorActive && wizardStep === 3 && isCombinedTask}
                     <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
                         <div class="flex items-center justify-between mb-3">
                             <div class="flex items-center space-x-2">
@@ -1637,45 +1908,39 @@
                             <p class="text-[11px] text-slate-500">请先在第一步「勾选智能体」，再回到本步配置其详情参数。</p>
                         {/if}
                     {:else}
-                    <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 text-xs items-start">
+                    <div class="grid grid-cols-1 {isCombinedTask ? 'xl:grid-cols-3' : ''} gap-4 text-xs items-start">
                         <!-- 1. 前置轻量级算法（当前算法项的阈值/目标/时长/冷却；面板绑顶层 config.*，切项时由 selectAlgorithm 写回/提取） -->
                         <div class="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 space-y-3 h-full">
                             <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                                 <span class="font-extrabold text-amber-400 flex items-center"><i class="fa-solid fa-microchip mr-1.5"></i> 1. 前置轻量级算法配置</span>
                                 <span class="text-[9px] text-slate-500">端侧低算力常驻运行</span>
                             </div>
+                            <!-- 最大/最小目标限制对应设备 targetMax/targetMin：整数目标个数，不是 0~1 比例 -->
                             <div class="grid grid-cols-2 gap-3">
                                 <div>
-                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">最大目标限制</label><span class="font-mono text-amber-400">{(+config.maxTarget).toFixed(2)}</span></div>
-                                    <input type="range" min="0" max="1" step="0.05" bind:value={config.maxTarget} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                                    <label class="block text-[10px] text-slate-400 mb-1">最大目标限制 (个)</label>
+                                    <input type="number" min="0" step="1" bind:value={config.maxTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
                                 </div>
                                 <div>
-                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">最小目标限制</label><span class="font-mono text-amber-400">{(+config.minTarget).toFixed(2)}</span></div>
-                                    <input type="range" min="0" max="1" step="0.05" bind:value={config.minTarget} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                                    <label class="block text-[10px] text-slate-400 mb-1">最小目标限制 (个)</label>
+                                    <input type="number" min="0" step="1" bind:value={config.minTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
                                 </div>
                             </div>
-                            <div class="grid grid-cols-2 gap-3">
-                                <div>
-                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">人体检测阈值</label><span class="font-mono text-amber-400">{config.yoloHumanThresh}</span></div>
-                                    <input type="range" min="0.1" max="0.9" step="0.01" bind:value={config.yoloHumanThresh} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
-                                </div>
-                                <div>
-                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">机动车检测阈值</label><span class="font-mono text-amber-400">{config.yoloVehicleThresh}</span></div>
-                                    <input type="range" min="0.1" max="0.9" step="0.01" bind:value={config.yoloVehicleThresh} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
-                                </div>
-                            </div>
+                            <!-- 设备侧一条规则只有一个 threshold：面板只暴露「当前检测目标」对应的那一个阈值，避免三条滑杆里两条无效 -->
                             <div class="grid grid-cols-2 gap-3">
                                 <div>
                                     <label class="block text-[10px] text-slate-400 mb-1">前置检测目标</label>
                                     <select bind:value={config.yoloTarget} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px]">
                                         <option value="human">人员 (人体检测)</option>
                                         <option value="vehicle">车辆</option>
-                                        <option value="any">全部目标</option>
+                                        {#if config.yoloTarget === 'any'}
+                                            <option value="any">其它目标（设备原值）</option>
+                                        {/if}
                                     </select>
                                 </div>
                                 <div>
-                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">非机动车检测阈值</label><span class="font-mono text-amber-400">{config.yoloNonMotorThresh}</span></div>
-                                    <input type="range" min="0.1" max="0.9" step="0.01" bind:value={config.yoloNonMotorThresh} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">{config.yoloTarget === 'vehicle' ? '车辆' : config.yoloTarget === 'human' ? '人体' : '其它目标'}检测阈值</label><span class="font-mono text-amber-400">{config[threshKey]}</span></div>
+                                    <input type="range" min="0.1" max="0.9" step="0.01" value={config[threshKey]} on:input={(e) => setThresh(e.target.value)} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
                                 </div>
                             </div>
                             <div class="grid grid-cols-2 gap-3">
@@ -1690,6 +1955,7 @@
                             </div>
                         </div>
 
+                        {#if isCombinedTask}
                         <!-- 2. 扩图倍数（target_expand 仅小+大生效，供二次大模型补足环境上下文） -->
                         <div class="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 space-y-3 h-full">
                             <div class="flex items-center justify-between border-b border-slate-800 pb-2">
@@ -1709,36 +1975,34 @@
                         <div class="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 space-y-3 h-full">
                             <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                                 <span class="font-extrabold text-indigo-400 flex items-center"><i class="fa-solid fa-brain mr-1.5"></i> 3. 级联后置多模态 Agent</span>
-                                <span class="text-[9px] {config.taskMode === 'combined' ? 'text-indigo-500/80' : 'text-slate-500'} font-bold">{config.taskMode === 'combined' ? '本算法命中后的二次复核' : '仅小+大协同任务可配置'}</span>
+                                <span class="text-[9px] text-indigo-500/80 font-bold">本算法命中后的二次复核</span>
                             </div>
-                            {#if config.taskMode === 'combined'}
-                                <div>
-                                    <label class="block text-[10px] text-slate-400 mb-1">选择二次大模型智能体（取自设备智能体目录）</label>
-                                    <select value={config.agentType || ''} on:change={(e) => changeAlgoAgent(config.activeAlgorithmIndex || 0, e.target.value)}
-                                            class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]">
-                                        <option value="" disabled>选择智能体算法…</option>
-                                        {#each availableAgents as a}
-                                            <option value={a.event_id}>{a.event_tag}{a.alarm_type === 'freeform' ? '（描述型）' : '（判断型）'}</option>
-                                        {/each}
-                                    </select>
-                                    {#if !availableAgents.length}
-                                        <p class="text-[9px] text-amber-500/80 mt-1">未取到设备智能体目录（设备离线时不可选）。</p>
-                                    {/if}
-                                </div>
-                                <div>
-                                    <div class="flex justify-between items-center mb-1"><label class="text-[10px] text-slate-400">智能体大模型视觉推理 Prompt 策略</label><span class="text-[9px] text-slate-600">Markdown语义控制</span></div>
-                                    <textarea bind:value={config.prompt} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="等待指令注入..."></textarea>
-                                </div>
-                            {:else}
-                                <p class="text-[10px] text-slate-500 leading-relaxed">纯小模型任务由端侧算法直接产出报警，无需二次大模型推理。若需大模型复核，请创建「小+大协同」任务。</p>
-                            {/if}
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-1">选择二次大模型智能体（取自设备智能体目录）</label>
+                                <select value={config.agentType || ''} on:change={(e) => changeAlgoAgent(config.activeAlgorithmIndex || 0, e.target.value)}
+                                        class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]">
+                                    <option value="" disabled>选择智能体算法…</option>
+                                    {#each availableAgents as a}
+                                        <option value={a.event_id}>{a.event_tag}{a.alarm_type === 'freeform' ? '（描述型）' : '（判断型）'}</option>
+                                    {/each}
+                                </select>
+                                {#if !availableAgents.length}
+                                    <p class="text-[9px] text-amber-500/80 mt-1">未取到设备智能体目录（设备离线时不可选）。</p>
+                                {/if}
+                            </div>
+                            <div>
+                                <div class="flex justify-between items-center mb-1"><label class="text-[10px] text-slate-400">智能体大模型视觉推理 Prompt 策略</label><span class="text-[9px] text-slate-600">Markdown语义控制</span></div>
+                                <textarea bind:value={config.prompt} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="等待指令注入..."></textarea>
+                            </div>
                         </div>
+                        {/if}
                     </div>
                     {/if}
                 </div>
             </div>
             {/if}
         </div>
+        {/if}
     </div>
 </div>
 

@@ -314,6 +314,37 @@ def _target_type_to_yolo(target_types: Optional[List[str]]) -> str:
     return "any"
 
 
+def _thresh_key(target_types: Optional[List[str]]) -> str:
+    """检测目标 → 面板阈值字段名。
+
+    设备侧一条规则只有一个 threshold，面板按『人体/车辆/非机动车』分三个字段存放；
+    回填时必须落到与 targetTypes 对应的那个字段，否则车辆算法的阈值会被写进人体阈值里。
+    """
+    mode = _target_type_to_yolo(target_types)
+    if mode == "vehicle":
+        return "yoloVehicleThresh"
+    if mode == "human":
+        return "yoloHumanThresh"
+    return "yoloNonMotorThresh"
+
+
+def _task_identity(task: dict) -> dict:
+    """从设备任务项提取面板『编辑保存』所需的身份字段：task_id + 首通道 channel_device_id。
+
+    缺了它们，从列表进入编辑态后无法定位要更新的设备任务（会退化成新建一条重复任务）。
+    """
+    ident: dict = {}
+    if not task:
+        return ident
+    if task.get("task_id") is not None:
+        ident["task_id"] = task.get("task_id")
+    dev_list = task.get("device_list") or []
+    first = dev_list[0] if dev_list and isinstance(dev_list[0], dict) else {}
+    if first.get("device_id") is not None:
+        ident["channel_device_id"] = first.get("device_id")
+    return ident
+
+
 def _is_full_frame(points: Optional[List[dict]]) -> bool:
     """近似判定一组归一化点是否为全画面矩形（四角 0/1，容差 0.02）。"""
     pts = points or []
@@ -379,6 +410,7 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
     """
     cfg: dict = {}
     cfg["taskMode"] = _task_mode(task, mon)
+    cfg.update(_task_identity(task))
     if task:
         if task.get("task_name"):
             cfg["name"] = task.get("task_name")
@@ -415,11 +447,11 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
         cfg["intrusionDuration"] = ep.get("duration")
     if "cooldownDuration" in ep:
         cfg["alarmInterval"] = ep.get("cooldownDuration")
-    if "threshold" in ep:
-        # payload 仅一个 threshold，对齐前端人体阈值（车辆/非机动车阈值无来源，前端保持默认）
-        cfg["yoloHumanThresh"] = ep.get("threshold")
     if ep.get("targetTypes"):
         cfg["yoloTarget"] = _target_type_to_yolo(ep.get("targetTypes"))
+    if "threshold" in ep:
+        # payload 仅一个 threshold，按 targetTypes 落到对应的面板阈值字段（其余阈值无来源，保持默认）
+        cfg[_thresh_key(ep.get("targetTypes"))] = ep.get("threshold")
 
     # 扩图区域仅『小+大』任务的 monitor 才有 target_expand
     expand = ep.get("target_expand") or {}
@@ -473,11 +505,11 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
         item["intrusionDuration"] = ep.get("duration")
     if "cooldownDuration" in ep:
         item["alarmInterval"] = ep.get("cooldownDuration")
-    if "threshold" in ep:
-        # payload 仅一个 threshold，对齐前端人体阈值（车辆/非机动车阈值无来源，前端保持默认）
-        item["yoloHumanThresh"] = ep.get("threshold")
     if ep.get("targetTypes"):
         item["yoloTarget"] = _target_type_to_yolo(ep.get("targetTypes"))
+    if "threshold" in ep:
+        # payload 仅一个 threshold，按 targetTypes 落到对应的面板阈值字段（其余阈值无来源，保持默认）
+        item[_thresh_key(ep.get("targetTypes"))] = ep.get("threshold")
 
     # 扩图区域仅『小+大』规则才有 target_expand
     expand = ep.get("target_expand") or {}
@@ -519,6 +551,7 @@ def monitors_to_panel_config(task: dict, monitors: Optional[List[dict]]) -> dict
         return monitor_to_panel_config(task, None)
 
     cfg: dict = {}
+    cfg.update(_task_identity(task))
     if task and task.get("task_name"):
         cfg["name"] = task.get("task_name")
 

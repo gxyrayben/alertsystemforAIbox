@@ -143,36 +143,70 @@ def _task_status(task: dict) -> str:
     return "启用" if task.get("enable") else "停用"
 
 
+def _task_state_label(task: dict) -> str:
+    """设备 task_state → 任务状态展示值：0=未启用 / 1=正常 / 其它(含缺失)=异常。
+
+    列表页三态『正常/异常/未启用』的唯一判据，纯大模型任务与算法仓任务共用，避免两处映射漂移。
+    """
+    raw = (task or {}).get("task_state")
+    if raw == 0:
+        return "未启用"
+    if raw == 1:
+        return "正常"
+    return "异常"
+
+
+def _algorithms_label(packages: list) -> str:
+    """算法仓任务的『关联智能体/算法』中文展示串。
+
+    每条规则取中文事件名（algorithm_catalog 查不到时退回英文 eventType）；『小+大协同』规则
+    追加 /二次大模型智能体名；多条以『、』连接并去重保序。
+    """
+    labels: List[str] = []
+    for pkg in packages or []:
+        minor = pkg.get("minor_type") or ""
+        name = algorithm_catalog.event_name(minor, pkg.get("major_type") or "") or minor
+        agent_tag = pkg.get("agent_event_tag")
+        label = f"{name}/{agent_tag}" if agent_tag else name
+        if label and label not in labels:
+            labels.append(label)
+    return "、".join(labels)
+
+
 def _index_monitors(monitor_list: list) -> tuple[list, str, set]:
     """把 monitor 列表按其归属的 task_id（字符串）建索引，供任务摘要富化小模型算法信息。
 
     每项值保留原始 monitor（供 task_builders.monitor_to_panel_config 做逆映射）并预取
     展示所需的 event_type / algo_cabin_name（best-effort，结构缺失时跳过该项，不抛异常）。
+    返回 (逐 monitor 摘要, 任务级类型, 算法 id 集合)；任务级类型按【全部规则聚合】：
+    任一规则挂了 agentLLMParam 即整个任务为『小+大协同』，否则为纯小模型。
     """
-    results=[]
-    algorithms_packages = []
+    results = []
     algorithms: set = set()
+    task_type = "small_task"
     for mon in monitor_list or []:
-        task_type = "small_task"
+        # 逐 monitor 重置：算法包清单属于单个算法仓，放在循环外会跨仓累积（同任务多仓互相污染）
+        algorithms_packages = []
         common = mon.get("common_param") or {}
         monitor_id = common.get("monitor_id")
         channel_device_id = common.get("channel_id")
         if monitor_id is None:
             continue
         warehouse = common.get("warehouse_v20_param") or {}
-        algoCabinName = warehouse.get("labels").get("algoCabinName")
+        algoCabinName = (warehouse.get("labels") or {}).get("algoCabinName")
         rules = warehouse.get("rulesParams") or []
         for r in rules:
-            agentLLMParam = r.get("extendParams",{}).get("aiotapCustom",{}).get("agentLLMParam",{})
-            if(agentLLMParam):
-                task_type="small_and_agent_task"
-                algorithms.add(f"SM-{r.get("eventType")}-AG-{agentLLMParam.get("event_tag")}")
+            agentLLMParam = ((r.get("extendParams") or {}).get("aiotapCustom") or {}).get("agentLLMParam") or {}
+            event_type = r.get("eventType")
+            if agentLLMParam:
+                # 聚合语义：只要有一条规则挂了二次大模型，整个任务即为协同任务（不被后续纯小模型规则覆盖）
+                task_type = "small_and_agent_task"
+                algorithms.add(f"SM-{event_type}-AG-{agentLLMParam.get('event_tag')}")
             else:
-                task_type="small_task"
-                algorithms.add(f"SM-{r.get("eventType")}")
+                algorithms.add(f"SM-{event_type}")
             algorithms_packages.append({
-                "major_type":algoCabinName,
-                "minor_type": r.get("eventType"), 
+                "major_type": algoCabinName,
+                "minor_type": event_type,
                 "agent_alarm_type": agentLLMParam.get("alarm_type"),
                 "agent_event_id": agentLLMParam.get("event_id"),
                 "agent_event_tag": agentLLMParam.get("event_tag"),
@@ -182,13 +216,14 @@ def _index_monitors(monitor_list: list) -> tuple[list, str, set]:
             })
 
         results.append({
-        "monitor_id": monitor_id,
-        "task_type": task_type,
-        "camera_device_id": channel_device_id,
-        "algorithms_packages":algorithms_packages,
+            "monitor_id": monitor_id,
+            "task_type": task_type,
+            "camera_device_id": channel_device_id,
+            "algorithms_packages": algorithms_packages,
         })
 
-    return results ,task_type, algorithms
+    return results, task_type, algorithms
+
 
 def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] = None) -> Tuple[List[dict], set]:
     """把设备原始任务列表压成前端展示用摘要，并收集全部算法 id。
@@ -196,61 +231,61 @@ def _summarize_tasks_algorithm(task_list: list, monitor_by_task: Optional[dict] 
     注意：task_list 中 agent_list 的智能体项使用 event_id/event_tag（非 agent_id）；
     小模型任务(single_point_task)的 agent_list 通常为空，其算法名(eventType)在 monitor 里，
     故通过 monitor_by_task（按 task_id 建索引）补齐『关联智能体/算法』列与查看回填用 detail。
+    每行同时输出列表页所需的 task_enable（是否启用开关的初值）与 algorithms_label（中文展示串）。
     """
     monitor_by_task = monitor_by_task or []
-    algorithms = set()
-    STATUS_MAP = {
-        0: "未启用",
-        1: "正常",
-    }
+    all_algorithms: set = set()
     task_list_all = []
     for task in task_list:
         task_agents = []
-        task_status = "未知"
+        # 逐任务重置：算法集合放在循环外会让每个任务的『关联算法』列累积到前面所有任务的算法
+        task_algorithms: set = set()
+        agent_names: List[str] = []
         task_type = task.get("task_type", "")
-        task_id = task.get("task_id", "") 
-        task_name = task.get("task_name", "") 
-        raw_status = task.get("task_state")
-        if(raw_status == 0):
-            task_status = "未启用"
-        if(raw_status == 1):
-            task_status = "正常"
-            
-        #task_status = STATUS_MAP.get(raw_status, "未知")
-        device_lists = task.get("device_list", []) 
+        task_id = task.get("task_id", "")
+        task_name = task.get("task_name", "")
+        task_status = _task_state_label(task)
+        device_lists = task.get("device_list", [])
         first_dev = device_lists[0] if device_lists else {}
-        device_name = first_dev.get("device_name","")
-        device_id = first_dev.get("device_id","")
+        device_name = first_dev.get("device_name", "")
+        device_id = first_dev.get("device_id", "")
 
         if task_type == "agent_real_task":
             agent_list = task.get("agent_list", [])
-            for a in agent_list :
-                algorithms.add(f"AG-{a.get("event_tag")}")
+            for a in agent_list:
+                event_tag = a.get("event_tag")
+                task_algorithms.add(f"AG-{event_tag}")
+                if event_tag and event_tag not in agent_names:
+                    agent_names.append(event_tag)
                 task_agents.append({
-                    "agent_id": a.get("event_id", "") ,
-                    "agent_name": a.get("event_tag"),
+                    "agent_id": a.get("event_id", ""),
+                    "agent_name": event_tag,
                 })
+            all_algorithms.update(task_algorithms)
 
             task_list_all.append({
                 "task_type": task_type,
                 "task_id": task_id,
                 "task_name": task_name,
                 "task_status": task_status,
+                # 是否启用开关的初值（enable 是设备侧使能标志，与运行态 task_state 相互独立）
+                "task_enable": bool(task.get("enable")),
                 "camera_device_name": device_name,
                 "camera_device_id": device_id,
-                "agents_tasks":task_agents,
-                "algorithms":list(algorithms),
-                "monitor_tasks":[],
+                "agents_tasks": task_agents,
+                "algorithms": list(task_algorithms),
+                "algorithms_label": "、".join(agent_names),
+                "monitor_tasks": [],
                 # 查看回填：纯大模型任务无 monitor，从 task.agent_list 还原多智能体 + 每智能体 ROI
                 "detail": task_builders.monitor_to_panel_config(task, None),
             })
 
     for task in monitor_by_task:
-        algorithms.update(task.get("algorithms",[]))
+        all_algorithms.update(task.get("algorithms", []))
 
     task_list_all.extend(monitor_by_task)
 
-    return task_list_all, algorithms
+    return task_list_all, all_algorithms
 
 
 def _summarize_tasks(task_list: list, monitor_by_task: list) -> Tuple[List[dict], set]:
@@ -560,6 +595,243 @@ class DeviceService:
                 task_id)
 
     @staticmethod
+    async def locate_task(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], task_id
+    ) -> Tuple[Optional[dict], Optional[int], Optional[str]]:
+        """按 task_id 在设备任务列表中定位任务，返回 (原始任务项, 首通道 device_id, 错误消息)。
+
+        与 agent_tools._locate_device_task 同语义，但放在本模块，供路由层的『编辑保存』复用
+        （agent_tools 依赖本模块，反向导入会成环）。
+        """
+        data = await DeviceService.get_device_tasks(client, device, db)
+        if not data or data.get("code") != 0:
+            return None, None, f"设备「{device.name}」离线或不可达，无法读取任务列表"
+        for t in (data.get("data") or {}).get("list", []) or []:
+            if str(t.get("task_id")) == str(task_id):
+                dev_list = t.get("device_list") or []
+                channel_device_id = (dev_list[0] or {}).get("device_id") if dev_list else None
+                return t, channel_device_id, None
+        return None, None, f"设备上未找到任务 task_id={task_id}"
+
+    @staticmethod
+    async def list_task_monitors(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], *,
+        task_id, channel_device_id,
+    ) -> List[dict]:
+        """读取某任务名下的全部 monitor（每个算法仓一条）；失败返回空列表（优雅降级）。"""
+        res = await DeviceService.authed_post(
+            client, device, db, MONITOR_LIST_PATH,
+            {"device_id": channel_device_id, "task_id": task_id})
+        return ((res or {}).get("data") or {}).get("param") or []
+
+    @staticmethod
+    def _apply_channel(task: dict, channel_device_id, current_channel_id) -> dict:
+        """通道变更时只替换 device_list[0].device_id，保留抽帧间隔等设备侧原有字段。"""
+        if not channel_device_id or str(channel_device_id) == str(current_channel_id):
+            return task
+        dev_list = task.get("device_list") or [{}]
+        first = dict(dev_list[0] or {})
+        first["device_id"] = int(channel_device_id)
+        task["device_list"] = [first] + list(dev_list[1:])
+        return task
+
+    @staticmethod
+    async def update_agent_real_task(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], *,
+        task_id,
+        task_name: str,
+        channel_device_id: Optional[int],
+        agents: List[dict],
+        analysis_interval: int = 5,
+    ) -> Tuple[bool, str]:
+        """就地更新【纯大模型智能体任务】(agent_real_task)：重建 agent_list + 任务名/分析间隔后 PUT。
+
+        agents 为路由层已富化的项（event_id/event_tag/prompt/alarm_condition/filter_* + area）。
+        设备靠 body 里的 task_id 区分更新与新建，故必须带上原 task_id（避免新建出重复任务）。
+        enable 沿用设备现值：启用/停用请走 set_task_enable，编辑保存不隐式改变使能状态。
+        返回 (成功?, 中文消息)。
+        """
+        task, cur_channel, err = await DeviceService.locate_task(client, device, db, task_id)
+        if err:
+            return False, err
+        if task.get("task_type") != "agent_real_task":
+            return False, f"任务 task_id={task_id} 不是纯大模型智能体任务，无法按智能体任务更新"
+
+        task = dict(task)
+        if task_name:
+            task["task_name"] = task_name
+        task["analysis_interval"] = analysis_interval
+        task["agent_list"] = [
+            {
+                "event_id": a.get("event_id"),
+                "event_tag": a.get("event_tag"),
+                "agent_config": task_builders.build_agent_config(a, a.get("area")),
+            }
+            for a in agents
+        ]
+        DeviceService._apply_channel(task, channel_device_id, cur_channel)
+
+        data = await DeviceService.update_task(client, device, db, DeviceService.build_task_payload(task))
+        if data is None:
+            return False, f"任务 task_id={task_id} 更新时设备不可达，请重试"
+        if data.get("code") != 0:
+            return False, f"任务 task_id={task_id} 更新失败：{data.get('message')}"
+        return True, f"智能体任务「{task.get('task_name')}」已更新（关联 {len(agents)} 个智能体）"
+
+    @staticmethod
+    async def update_warehouse_task_multi(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], *,
+        task_id,
+        task_name: str,
+        channel_device_id: Optional[int],
+        algorithms: List[dict],
+    ) -> Tuple[bool, str]:
+        """就地更新【算法仓多算法任务】：任务级 PUT + 按算法仓覆盖重下 monitor。
+
+        设备既无 monitor 更新接口也无删除接口，因此：
+        - 保留的仓：用【该仓原 monitor_id】+ 同 algoCabinName 覆盖下发新 rulesParams（整仓替换）；
+        - 新增的仓：monitor_id 取默认 int(task_id)，与创建路径同一契约；
+        - 编辑中被移除的仓：原规则原样重下但 enable=False（停用降级，与 _disable_whole_task 一致）。
+        enable 沿用设备现值（启用/停用走 set_task_enable）。返回 (成功?, 中文消息)。
+        """
+        if not algorithms:
+            return False, "未提供任何算法，无法更新任务"
+        task, cur_channel, err = await DeviceService.locate_task(client, device, db, task_id)
+        if err:
+            return False, err
+        if task.get("task_type") == "agent_real_task":
+            return False, f"任务 task_id={task_id} 为纯大模型智能体任务，无法按算法仓任务更新"
+        channel = channel_device_id or cur_channel
+        if channel is None:
+            return False, f"任务 task_id={task_id} 缺少通道信息，无法更新"
+
+        # ① 先 PUT 任务级字段（名称/通道）；失败即中止，避免只改了 monitor 造成名实不符
+        task = dict(task)
+        if task_name:
+            task["task_name"] = task_name
+        DeviceService._apply_channel(task, channel_device_id, cur_channel)
+        data = await DeviceService.update_task(client, device, db, DeviceService.build_task_payload(task))
+        if data is None:
+            return False, f"任务 task_id={task_id} 更新时设备不可达，请重试"
+        if data.get("code") != 0:
+            return False, f"任务 task_id={task_id} 更新失败：{data.get('message')}"
+
+        # ② 现有 monitor 索引：仓名 → (monitor_id / monitor_name / version / 原规则)
+        existing = await DeviceService.list_task_monitors(
+            client, device, db, task_id=task_id, channel_device_id=channel)
+        index: dict = {}
+        for mon in existing:
+            common = mon.get("common_param") or {}
+            labels = ((common.get("warehouse_v20_param") or {}).get("labels")) or {}
+            index[labels.get("algoCabinName")] = {
+                "monitor_id": common.get("monitor_id"),
+                "monitor_name": common.get("monitor_name"),
+                "version": labels.get("version", "V2.0.0"),
+                "rules": task_builders._warehouse_rules(mon),
+            }
+
+        # ③ 按仓分组覆盖下发（保留仓沿用原 monitor_id，新增仓用默认值 int(task_id)）
+        groups: dict = {}
+        for algo in algorithms:
+            groups.setdefault(algo.get("algo_cabin_name"), []).append(algo)
+        failed: List[str] = []
+        for cabin, group in groups.items():
+            rules = [
+                task_builders.build_rule(
+                    event_type=algo.get("event_type"),
+                    area=algo.get("area"),
+                    target_types=algo.get("target_types"),
+                    threshold=algo.get("threshold", 0.3),
+                    target_max=algo.get("target_max", 1),
+                    target_min=algo.get("target_min", 0),
+                    duration=algo.get("duration", 3),
+                    cooldown=algo.get("cooldown", 600),
+                    agent_llm=algo.get("agent_llm"),
+                    target_expand=algo.get("target_expand"),
+                )
+                for algo in group
+            ]
+            old = index.get(cabin) or {}
+            monitor_payload = task_builders.build_warehouse_monitor(
+                task_id, int(channel), cabin, rules,
+                version=group[0].get("version", "V2.0.0"),
+                monitor_id=old.get("monitor_id"),
+                monitor_name=old.get("monitor_name") or task_name or task.get("task_name"),
+            )
+            mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
+            if not mon_res or mon_res.get("code") != 0:
+                msg = (mon_res or {}).get("message") or "设备不可达或返回错误"
+                failed.append(f"「{cabin}」：{msg}")
+
+        # ④ 编辑中被移除的仓：设备无删除接口，原规则原样重下但置 enable=False
+        disabled = 0
+        for cabin, old in index.items():
+            if not cabin or cabin in groups:
+                continue
+            payload = task_builders.build_warehouse_monitor(
+                task_id, int(channel), cabin, old.get("rules") or [],
+                version=old.get("version", "V2.0.0"),
+                monitor_id=old.get("monitor_id"),
+                monitor_name=old.get("monitor_name"),
+                enable=False,
+            )
+            r = await DeviceService.create_monitor(client, device, db, payload)
+            if r and r.get("code") == 0:
+                disabled += 1
+
+        if failed:
+            return (False,
+                    f"任务 task_id={task_id} 已更新名称，但 {len(failed)}/{len(groups)} 个算法仓下发失败："
+                    + "；".join(failed))
+        extra = f"，停用 {disabled} 个已移除的算法仓" if disabled else ""
+        return (True,
+                f"布控任务「{task.get('task_name')}」已更新"
+                f"（task_id={task_id}，{len(groups)} 个算法仓 / {len(algorithms)} 个算法{extra}）")
+
+    @staticmethod
+    async def set_task_enable(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession], *,
+        task_id, enable: bool,
+    ) -> Tuple[bool, str]:
+        """启用/停用整个任务：任务级 PUT enable + best-effort 同步其名下各算法仓 monitor 的 enable。
+
+        任务级 PUT 是主判据；monitor 同步失败不阻断（原规则保留，仅使能位可能滞后，
+        下次编辑保存或再次切换会修正）。返回 (成功?, 中文消息)。
+        """
+        task, channel, err = await DeviceService.locate_task(client, device, db, task_id)
+        if err:
+            return False, err
+        task = dict(task)
+        task["enable"] = bool(enable)
+        data = await DeviceService.update_task(client, device, db, DeviceService.build_task_payload(task))
+        if data is None:
+            return False, f"任务 task_id={task_id} 状态切换时设备不可达，请重试"
+        if data.get("code") != 0:
+            return False, f"任务 task_id={task_id} 状态切换失败：{data.get('message')}"
+
+        synced = 0
+        if task.get("task_type") != "agent_real_task" and channel is not None:
+            for mon in await DeviceService.list_task_monitors(
+                    client, device, db, task_id=task_id, channel_device_id=channel):
+                common = mon.get("common_param") or {}
+                labels = ((common.get("warehouse_v20_param") or {}).get("labels")) or {}
+                payload = task_builders.build_warehouse_monitor(
+                    task_id, int(channel), labels.get("algoCabinName", ""),
+                    task_builders._warehouse_rules(mon),
+                    version=labels.get("version", "V2.0.0"),
+                    monitor_id=common.get("monitor_id"),
+                    monitor_name=common.get("monitor_name"),
+                    enable=bool(enable),
+                )
+                r = await DeviceService.create_monitor(client, device, db, payload)
+                if r and r.get("code") == 0:
+                    synced += 1
+
+        word = "启用" if enable else "停用"
+        extra = f"（同步 {synced} 个算法仓）" if synced else ""
+        return True, f"任务 task_id={task_id} 已{word}{extra}"
+
+    @staticmethod
     async def list_monitors(client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession] = None):
         """拉取设备 monitor 列表（用于富化任务摘要里的小模型算法名）。
 
@@ -676,20 +948,11 @@ class DeviceService:
         """拉取 monitor 列表并按 task_id 建索引；失败/接口不存在时返回空 dict（优雅降级）。
         会话 cookie 已在 fetch_device_data 登录阶段设置到 client 上，此处直接复用。"""
         results : List[dict] = []
-        # 1. 定义状态码映射字典
-        STATUS_MAP = {
-            0: "未启用",
-            1: "正常",
-        }
 
         try:
             for task in task_list:
-                task_status = "未知"
-                raw_status = task.get("task_state")
-                if(raw_status == 0):
-                    task_status = "未启用"
-                if(raw_status == 1):
-                    task_status = "正常"
+                # 状态三态（正常/异常/未启用）与纯大模型任务共用同一映射
+                task_status = _task_state_label(task)
                 task_type = task.get("task_type", "") 
                 task_id = task.get("task_id", "") 
                 #raw_status = task.get("task_state")
@@ -711,15 +974,20 @@ class DeviceService:
                          monitor_data, task_type ,algorithms = _index_monitors(param)
                          monitor_param.extend(monitor_data)
 
+                    # 『关联智能体/算法』中文列：汇总该任务名下各算法仓的全部规则
+                    packages = [pkg for m in monitor_param for pkg in (m.get("algorithms_packages") or [])]
                     results.append({
                         "task_type":task_type,
                         "task_id": task_id,
                         "task_name": task.get("task_name", ""),
                         "task_status":task_status,
+                        # 是否启用开关的初值（设备侧 enable 使能标志）
+                        "task_enable": bool(task.get("enable")),
                         "camera_device_name": device_name,
                         "camera_device_id": device_id,
                         "monitor_tasks": monitor_param,
                         "algorithms": list(algorithms),
+                        "algorithms_label": _algorithms_label(packages),
                         "agents_tasks": [],
                         # 查看回填：把设备任务 + 其全部 monitor/rulesParams 逆映射为面板可展开的多算法真实参数
                         "detail": task_builders.monitors_to_panel_config(task, param),
