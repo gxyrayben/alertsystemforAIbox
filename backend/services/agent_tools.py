@@ -236,6 +236,42 @@ async def _find_agent(client, device, db, agent_id: str):
     return None, "NOT_FOUND"
 
 
+async def _algorithm_rows(client, device, db):
+    """拉取设备算法仓 + 卡片并整形为算法行，返回 (rows, 错误)；离线/失败时 rows=[]、错误非空。
+
+    行形状 {algoCabinName, version, eventType, eventName, targetTypes, description}：
+    供【对话查询】list_device_algorithms 与【草案附目录】propose_deployment 共用，避免整形逻辑漂移。
+    card_cap 无数据时至少按算法仓兜底列出。
+    """
+    packet = await DeviceService.list_alg_warehouses(client, device, db)
+    cards = await DeviceService.list_alg_cards(client, device, db)
+    if packet is None:
+        return [], f"设备「{device.name}」离线或不可达，无法查询算法仓"
+    if packet.get("code") != 0:
+        return [], f"查询算法仓失败：{packet.get('message')}"
+    warehouses = packet.get("data", {}).get("list", [])
+    wh_by_file = {w.get("file_id"): w for w in warehouses if w.get("file_id") is not None}
+    rows = []
+    card_list = (cards or {}).get("data", {}).get("cards", []) if isinstance(cards, dict) else []
+    for c in card_list:
+        w = wh_by_file.get(c.get("file_id")) or (warehouses[0] if warehouses else {})
+        for at in c.get("alertor_type", []):
+            event_type = at.get("alertor_type", "")
+            rows.append({
+                "algoCabinName": w.get("alg_name", ""),
+                "version": w.get("alg_version", "V2.0.0"),
+                "eventType": event_type,
+                "eventName": _alg_event_name(event_type),  # 英文算法ID → 中文事件名
+                "targetTypes": at.get("target_type", []),
+                "description": w.get("status", ""),
+            })
+    if not rows:  # card_cap 无数据时至少列出算法仓
+        rows = [{"algoCabinName": w.get("alg_name", ""), "version": w.get("alg_version", "V2.0.0"),
+                 "eventType": "", "eventName": "", "targetTypes": [], "description": w.get("status", "")}
+                for w in warehouses]
+    return rows, None
+
+
 async def _locate_device_task(client, device, db, task_id):
     """按 task_id 在设备任务列表中定位任务，返回 (task, channel_device_id, 错误消息)。
 
@@ -651,32 +687,9 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         if not device:
             return _err("未找到设备，请先在『设备接入』添加并获取详情")
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            packet = await DeviceService.list_alg_warehouses(client, device, db)
-            cards = await DeviceService.list_alg_cards(client, device, db)
-        if packet is None:
-            return _err(f"设备「{device.name}」离线或不可达，无法查询算法仓")
-        if packet.get("code") != 0:
-            return _err(f"查询算法仓失败：{packet.get('message')}")
-        warehouses = packet.get("data", {}).get("list", [])
-        wh_by_file = {w.get("file_id"): w for w in warehouses if w.get("file_id") is not None}
-        rows = []
-        card_list = (cards or {}).get("data", {}).get("cards", []) if isinstance(cards, dict) else []
-        for c in card_list:
-            w = wh_by_file.get(c.get("file_id")) or (warehouses[0] if warehouses else {})
-            for at in c.get("alertor_type", []):
-                event_type = at.get("alertor_type", "")
-                rows.append({
-                    "algoCabinName": w.get("alg_name", ""),
-                    "version": w.get("alg_version", "V2.0.0"),
-                    "eventType": event_type,
-                    "eventName": _alg_event_name(event_type),  # 英文算法ID → 中文事件名
-                    "targetTypes": at.get("target_type", []),
-                    "description": w.get("status", ""),
-                })
-        if not rows:  # card_cap 无数据时至少列出算法仓
-            rows = [{"algoCabinName": w.get("alg_name", ""), "version": w.get("alg_version", "V2.0.0"),
-                     "eventType": "", "eventName": "", "targetTypes": [], "description": w.get("status", "")}
-                    for w in warehouses]
+            rows, err = await _algorithm_rows(client, device, db)  # 整形逻辑抽到 _algorithm_rows 复用
+        if err:
+            return _err(err)
         return _ok({"device_id": device.device_id, "count": len(rows), "algorithms": rows})
 
     if name == "list_agents":
@@ -1228,6 +1241,7 @@ async def _propose_deployment(args: dict, db: AsyncSession) -> str:
 
     cfg = _recommended_config(args.get("task_name", "") or "AI布控任务", args.get("event_type"))
     agent = None
+    algo_rows = []  # 小模型/小+大：设备算法目录（供前端 Step1 多选，与 agent 分支的 available_agents 对称）
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         # 小模型 / 小+大：授权门禁
         if task_type in ("smallmodel", "combined"):
@@ -1240,6 +1254,8 @@ async def _propose_deployment(args: dict, db: AsyncSession) -> str:
             if not _is_authorized(pkgs, algo):
                 available = "、".join(p.get("package_name", "") for p in pkgs) or "（无）"
                 return _err(f"设备未授权算法「{algo}」，无法生成布控方案。当前已授权：{available}")
+            # 授权通过后取一次算法目录（best-effort，失败不阻断方案；仅作前端多选下拉）
+            algo_rows, _ = await _algorithm_rows(client, device, db)
 
         # 大模型 / 小+大：智能体算法存在校验
         if task_type in ("agent", "combined"):
@@ -1326,6 +1342,13 @@ async def _propose_deployment(args: dict, db: AsyncSession) -> str:
             "rois": rois,
             "activeAgentIndex": active_index,
             "available_agents": available,
+        })
+    elif task_type in ("smallmodel", "combined"):
+        # 小模型 / 小+大：声明 taskMode（供前端归一化 kind=combined，修正对话草案原缺 taskMode 的隐患）
+        # 并附设备算法目录 available_algorithms（只读，供 Step1 多选/新增算法），与 agent 分支的 available_agents 对称。
+        proposal.update({
+            "taskMode": task_type,
+            "available_algorithms": algo_rows,
         })
     return _ok({"success": True, "proposal": proposal,
                 "message": f"已为设备「{device.name}」生成布控方案预览，请在右侧界面确认参数并绘制检测区(ROI)。"})
