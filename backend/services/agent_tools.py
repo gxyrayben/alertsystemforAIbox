@@ -239,37 +239,10 @@ async def _find_agent(client, device, db, agent_id: str):
 async def _algorithm_rows(client, device, db):
     """拉取设备算法仓 + 卡片并整形为算法行，返回 (rows, 错误)；离线/失败时 rows=[]、错误非空。
 
-    行形状 {algoCabinName, version, eventType, eventName, targetTypes, description}：
-    供【对话查询】list_device_algorithms 与【草案附目录】propose_deployment 共用，避免整形逻辑漂移。
-    card_cap 无数据时至少按算法仓兜底列出。
+    整形逻辑已上提到 DeviceService.list_algorithm_rows，与面板的 GET /devices/{id}/algorithms
+    共用同一事实源；此处保留薄封装，仅为不动对话侧既有调用点。
     """
-    packet = await DeviceService.list_alg_warehouses(client, device, db)
-    cards = await DeviceService.list_alg_cards(client, device, db)
-    if packet is None:
-        return [], f"设备「{device.name}」离线或不可达，无法查询算法仓"
-    if packet.get("code") != 0:
-        return [], f"查询算法仓失败：{packet.get('message')}"
-    warehouses = packet.get("data", {}).get("list", [])
-    wh_by_file = {w.get("file_id"): w for w in warehouses if w.get("file_id") is not None}
-    rows = []
-    card_list = (cards or {}).get("data", {}).get("cards", []) if isinstance(cards, dict) else []
-    for c in card_list:
-        w = wh_by_file.get(c.get("file_id")) or (warehouses[0] if warehouses else {})
-        for at in c.get("alertor_type", []):
-            event_type = at.get("alertor_type", "")
-            rows.append({
-                "algoCabinName": w.get("alg_name", ""),
-                "version": w.get("alg_version", "V2.0.0"),
-                "eventType": event_type,
-                "eventName": _alg_event_name(event_type),  # 英文算法ID → 中文事件名
-                "targetTypes": at.get("target_type", []),
-                "description": w.get("status", ""),
-            })
-    if not rows:  # card_cap 无数据时至少列出算法仓
-        rows = [{"algoCabinName": w.get("alg_name", ""), "version": w.get("alg_version", "V2.0.0"),
-                 "eventType": "", "eventName": "", "targetTypes": [], "description": w.get("status", "")}
-                for w in warehouses]
-    return rows, None
+    return await DeviceService.list_algorithm_rows(client, device, db)
 
 
 async def _locate_device_task(client, device, db, task_id):

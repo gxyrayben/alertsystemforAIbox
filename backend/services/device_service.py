@@ -81,6 +81,31 @@ def _parse_channels(items: list) -> List[dict]:
         for item in items
     ]
 
+def algorithm_rows_from_ability(algorithms_ability) -> List[dict]:
+    """设备快照 algorithms_ability([{name, cards[]}]) → 算法目录行（设备离线时的兜底）。
+
+    快照只有算法仓名与事件类型，缺 alg_version/目标类型，故 version 退回 V2.0.0、targetTypes 留空；
+    中文事件名仍走 algorithm_catalog 映射，保证与实时目录显示一致。
+    """
+    rows: List[dict] = []
+    for pocket in algorithms_ability or []:
+        if not isinstance(pocket, dict):
+            continue
+        cabin = pocket.get("name") or ""
+        for event_type in pocket.get("cards") or []:
+            if not event_type:
+                continue
+            rows.append({
+                "algoCabinName": cabin,
+                "version": "V2.0.0",
+                "eventType": event_type,
+                "eventName": algorithm_catalog.event_name(event_type),
+                "targetTypes": [],
+                "description": "",
+            })
+    return rows
+
+
 def _parse_algorithms(items: list) -> List[dict]:
     results = []
     for item in items:
@@ -426,6 +451,42 @@ class DeviceService:
             body["file_id"] = file_id
         return await DeviceService.authed_post(
             client, device, db, "/intelli_manager/alg_warehouse/card_cap", body)
+
+    @staticmethod
+    async def list_algorithm_rows(client, device, db=None) -> Tuple[List[dict], Optional[str]]:
+        """拉取设备算法仓 + 卡片能力并整形为算法目录行，返回 (rows, 错误)；离线/失败时 rows=[]、错误非空。
+
+        行形状 {algoCabinName, version, eventType, eventName, targetTypes, description}：
+        供【对话草案】propose_deployment 与【面板目录】GET /devices/{id}/algorithms 共用，避免整形逻辑漂移。
+        card_cap 无数据时至少按算法仓兜底列出。
+        """
+        packet = await DeviceService.list_alg_warehouses(client, device, db)
+        cards = await DeviceService.list_alg_cards(client, device, db)
+        if packet is None:
+            return [], f"设备「{device.name}」离线或不可达，无法查询算法仓"
+        if packet.get("code") != 0:
+            return [], f"查询算法仓失败：{packet.get('message')}"
+        warehouses = packet.get("data", {}).get("list", [])
+        wh_by_file = {w.get("file_id"): w for w in warehouses if w.get("file_id") is not None}
+        rows: List[dict] = []
+        card_list = (cards or {}).get("data", {}).get("cards", []) if isinstance(cards, dict) else []
+        for c in card_list:
+            w = wh_by_file.get(c.get("file_id")) or (warehouses[0] if warehouses else {})
+            for at in c.get("alertor_type", []):
+                event_type = at.get("alertor_type", "")
+                rows.append({
+                    "algoCabinName": w.get("alg_name", ""),
+                    "version": w.get("alg_version", "V2.0.0"),
+                    "eventType": event_type,
+                    "eventName": algorithm_catalog.event_name(event_type),  # 英文算法ID → 中文事件名
+                    "targetTypes": at.get("target_type", []),
+                    "description": w.get("status", ""),
+                })
+        if not rows:  # card_cap 无数据时至少列出算法仓
+            rows = [{"algoCabinName": w.get("alg_name", ""), "version": w.get("alg_version", "V2.0.0"),
+                     "eventType": "", "eventName": "", "targetTypes": [], "description": w.get("status", "")}
+                    for w in warehouses]
+        return rows, None
 
     @staticmethod
     async def list_agents(client, device, db=None):

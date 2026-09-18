@@ -10,7 +10,8 @@ from models.db import get_db
 from models.schemas import (Device, AgentCreate, AgentTaskDeploy, SmallModelTaskDeploy, CombinedTaskDeploy,
                             WarehouseTaskDeploy, TaskEnableUpdate)
 from models.orm import DeviceORM
-from services.device_service import DeviceService, apply_device_snapshot, _parse_agents
+from services.device_service import (DeviceService, apply_device_snapshot, _parse_agents,
+                                     algorithm_rows_from_ability)
 from services import task_builders as tb
 from services import task_validation
 from services.crud import get_or_404
@@ -109,6 +110,26 @@ async def list_device_agents(device_id: str, refresh: bool = Query(True), db: As
         return {"count": len(agents), "agents": agents}
     agents = await _refresh_agents(device_obj, db)
     return {"count": len(agents), "agents": agents}
+
+
+@router.get("/{device_id}/algorithms")
+async def list_device_algorithms(device_id: str, refresh: bool = Query(True), db: AsyncSession = Depends(get_db)):
+    """小模型算法目录（算法仓 + 事件类型），供面板『新建/编辑布控任务』的算法下拉。
+
+    refresh=True（默认）：实时拉设备算法仓 + 卡片能力，带真实 alg_version/目标类型；
+    refresh=False 或设备不可达：退回快照 algorithms_ability 拍平（无版本/目标类型，离线可用）。
+    注意不要用 device.available_algorithms —— 那里存的是任务里已用到的算法ID字符串，不是能力目录。
+    """
+    device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
+    rows, err = [], ""
+    if refresh:
+        async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+            rows, err = await DeviceService.list_algorithm_rows(client, device_obj, db)
+    fallback = False
+    if not rows:  # 离线/未刷新 → 快照兜底，保证面板下拉不空
+        rows = algorithm_rows_from_ability(json.loads(device_obj.algorithms_ability or "[]"))
+        fallback = True
+    return {"count": len(rows), "algorithms": rows, "fallback": fallback, "message": err or ""}
 
 
 def _raise_device_error(msg: str) -> None:

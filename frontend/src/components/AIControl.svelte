@@ -373,22 +373,31 @@
         }
     }
 
-    // ── 算法目录（小模型/小+大）：供 Step1 多选/新增算法。优先用 proposal.available_algorithms，
-    //    缺失时 best-effort 解析设备快照 $selectedDevice.available_algorithms / algorithms_ability。
-    async function loadAvailableAlgorithms() {
-        const dev = $selectedDevice;
+    // 快照兜底：把 algorithms_ability([{name, cards[]}]) 拍平成算法目录行（无版本/目标类型/中文名）
+    function abilityAlgorithmRows(dev) {
         let raw = [];
-        try { raw = JSON.parse(dev?.available_algorithms || dev?.algorithms_ability || '[]'); } catch (e) { raw = []; }
-        availableAlgorithms = (Array.isArray(raw) ? raw : []).map((a) => ({
-            algoCabinName: a.algoCabinName || a.alg_name || a.algo_cabin_name || '',
-            version: a.version || a.alg_version || 'V2.0.0',
-            eventType: a.eventType || a.event_type || a.alertor_type || '',
-            eventName: a.eventName || a.event_name || '',
-            targetTypes: a.targetTypes || a.target_type || []
-        })).filter((a) => a.eventType || a.algoCabinName);
+        try { raw = JSON.parse(dev?.algorithms_ability || '[]'); } catch (e) { raw = []; }
+        return (Array.isArray(raw) ? raw : []).flatMap((p) => (p?.cards || []).map((t) => ({
+            algoCabinName: p?.name || '', version: 'V2.0.0', eventType: t, eventName: '', targetTypes: []
+        }))).filter((a) => a.eventType);
     }
 
-    // 算法仓任务目录预热：算法目录（rows 优先用后端 proposal.available_algorithms，缺失则解析设备快照）
+    // ── 算法目录（小模型/小+大）：供 Step1 多选/新增算法。
+    //    走后端 GET /devices/{id}/algorithms（实时取算法仓 + 卡片能力，设备离线时后端用快照兜底）。
+    //    不要直接读 dev.available_algorithms —— 那里存的是任务里已用到的算法ID字符串，不是能力目录，
+    //    早先按它解析会整形出一堆空对象并被过滤光，表现为「添加算法」目录为空。
+    async function loadAvailableAlgorithms() {
+        const dev = $selectedDevice;
+        if (!dev?.id) { availableAlgorithms = []; return; }
+        try {
+            const res = await apiGet(`/devices/${dev.id}/algorithms?refresh=true`);
+            availableAlgorithms = res?.algorithms || [];
+        } catch (e) {
+            availableAlgorithms = abilityAlgorithmRows(dev);  // 后端不可达时前端再兜底一次
+        }
+    }
+
+    // 算法仓任务目录预热：算法目录（rows 优先用后端 proposal.available_algorithms，缺失则查设备算法目录接口）
     // + 小+大任务额外取智能体目录（Step1 逐算法/Step3 的「二次大模型」下拉需要）
     async function loadWarehouseCatalogs(rows) {
         availableAlgorithms = Array.isArray(rows) && rows.length ? rows : [];
