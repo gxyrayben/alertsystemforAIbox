@@ -35,10 +35,13 @@
 
     const defaultConfig = {
         name: '', device: 'diaozhuang-2', interval: 5, agentType: '跌倒test', prompt: '',
-        yoloTarget: 'human', yoloHumanThresh: 0.31, yoloVehicleThresh: 0.32, yoloNonMotorThresh: 0.37,
+        // yoloTarget=面板主目标（决定用哪个阈值字段）；yoloTargets=设备目标类型ID多选，下发为 target_types
+        yoloTarget: 'human', yoloTargets: ['PERSON'],
+        yoloHumanThresh: 0.31, yoloVehicleThresh: 0.32, yoloNonMotorThresh: 0.37,
         intrusionDuration: 3, alarmInterval: 10,
         cropUp: 0.5, cropDown: 0.3, cropLeft: 0.4, cropRight: 0.6,
-        maxTarget: 1.0, minTarget: 0.0, roiPoints: [],
+        // 目标大小（设备 targetMax/targetMin）：最小 0~100、最大 50~100
+        maxTarget: 100, minTarget: 0, roiPoints: [],
         event_type: '', algo_cabin_name: '',    // 算法标识（propose/对话填充；查看态无来源，靠 deploy() guard 拦截）
         // 智能体任务（agent_real_task）专用：
         taskMode: 'smallmodel',   // 'agent' | 'smallmodel' | 'combined'
@@ -67,6 +70,7 @@
     let templateApplied = false;   // true=当前面板参数来自「套用模板」(路径 b/c)，部署时跳过强制 ROI 门禁；手动配置为 false
     let monitorActive = false;
     let roiDrawActive = false;
+    let drawingRoiId = null; // 画布当前正在绘制/续画的检测区 id（与算法无关：先画区域，再在对应关系表里关联算法）
     let sceneImage = null;   // 视频区载入的真实报警大图（绝对 URL），null 时回退占位图
     let roiSvgRef;           // ROI 绘制图层，用于把点击换算成归一化坐标
     let chatScrollRef;
@@ -92,11 +96,16 @@
     // ── 派生态：智能体任务 & 算法仓任务共享「池 + 逐项 ROI 绑定」模型 ────────
     $: isAgentTask = config.taskMode === 'agent';
     $: activeAgent = (config.agents || [])[config.activeAgentIndex] || null;
-    // 算法仓任务的当前编辑算法项（与 activeAgent 镜像；Phase 1 恒为第 0 项）
+    // 算法仓任务的当前编辑算法项（与 activeAgent 镜像，仅第③步详情参数使用）
     $: activeAlgorithm = (config.algorithms || [])[config.activeAlgorithmIndex] || null;
-    // ROI 绘制/绑定的作用对象：大模型任务=当前智能体，算法仓任务=当前算法项
-    $: activeItem = isAgentTask ? activeAgent : activeAlgorithm;
-    $: activeRoi = (config.rois || []).find((r) => r.id === activeItem?.roiId) || (config.rois || [])[0] || { points: [] };
+    // 第②步的绘制对象是【检测区本身】，与当前算法/智能体无关：画完再在对应关系表里勾选关联项
+    $: drawingRoi = (config.rois || []).find((r) => r.id === drawingRoiId) || null;
+    // 绘制目标被删除 / 换任务重载配置后不在池中：复位为「待新建」，避免画布指向幽灵区域
+    $: if (drawingRoiId && config.rois && !config.rois.some((r) => r.id === drawingRoiId)) drawingRoiId = null;
+    // 不变式：ROI 池恒有默认「全屏检测」伪项（任何来源回填后补齐），它是对应关系表的默认关联行
+    $: if (config.rois && !config.rois.some((r) => r.id === 'full')) {
+        config.rois = [{ id: 'full', name: '全屏检测', points: [] }, ...config.rois];
+    }
 
     // Step1「关联通道」下拉项：解析 $selectedDevice.channels（镜像 Alerts.svelte parseChannelsNames：按 device_id 去重 + display_name）
     $: channelOptions = (() => {
@@ -128,6 +137,39 @@
     // 三阈值收敛为「检测目标 + 该目标阈值」一组控件：面板仍按目标写回对应字段（与后端 _thresh_key 对齐）
     $: threshKey = config.yoloTarget === 'vehicle' ? 'yoloVehicleThresh'
         : config.yoloTarget === 'human' ? 'yoloHumanThresh' : 'yoloNonMotorThresh';
+
+    // ── 检测目标（设备 targetTypes）：支持多目标勾选 ───────────────────────
+    // 选项优先取算法目录里该算法自带的 targetTypes（设备真实能力），取不到时用通用兜底集。
+    const TARGET_TYPE_LABELS = { PERSON: '人员 (人体检测)', VEHICLE: '车辆', NON_MOTOR: '非机动车', NONMOTOR: '非机动车', FACE: '人脸' };
+    const FALLBACK_TARGET_TYPES = ['PERSON', 'VEHICLE', 'NON_MOTOR'];
+    const YOLO_TO_TARGET = { human: 'PERSON', vehicle: 'VEHICLE', any: 'NON_MOTOR' };
+    const targetTypeLabel = (t) => TARGET_TYPE_LABELS[String(t || '').toUpperCase()] || t;
+    // 设备目标类型ID → 面板主目标标识（与后端 _target_type_to_yolo 对齐）
+    const targetToYolo = (t) => {
+        const up = String(t || '').toUpperCase();
+        return up === 'PERSON' ? 'human' : up === 'VEHICLE' ? 'vehicle' : 'any';
+    };
+    // 当前算法可选目标类型：目录行的 targetTypes 优先，缺失（离线快照）用兜底集
+    $: targetTypeOptions = (() => {
+        const hit = availableAlgorithms.find((a) => algoOptionKey(a) === algoItemKey(activeAlgorithm));
+        const list = (hit?.targetTypes || []).filter(Boolean);
+        const base = list.length ? list : FALLBACK_TARGET_TYPES;
+        // 已选但目录里没有的目标（设备原值）也要出现在下拉里，否则会被静默丢弃
+        return [...new Set([...base, ...selectedTargets])];
+    })();
+    // 已勾选目标：老配置只有单值 yoloTarget 时按它推导，保证回填不丢
+    $: selectedTargets = (Array.isArray(config.yoloTargets) && config.yoloTargets.length)
+        ? config.yoloTargets
+        : [YOLO_TO_TARGET[config.yoloTarget] || 'PERSON'];
+    let targetPickerOpen = false;
+
+    // 勾选/取消一个检测目标：至少保留一个；主目标(yoloTarget)恒跟随首个已选目标，阈值字段随之切换
+    function toggleTargetType(tt, checked) {
+        let next = checked ? [...selectedTargets, tt] : selectedTargets.filter((t) => t !== tt);
+        next = [...new Set(next)];
+        if (!next.length) { showToast('至少需要勾选一个检测目标。', 'warning'); return; }
+        config = { ...config, yoloTargets: next, yoloTarget: targetToYolo(next[0]) };
+    }
 
     // 设备任务类型 → 列表展示名（single_point_task 为纯小模型任务的设备原始类型名）
     const TASK_TYPE_LABELS = {
@@ -197,6 +239,7 @@
         templateApplied = false;
         monitorActive = false;
         roiDrawActive = false;
+        drawingRoiId = null;
         sceneImage = null;
         showHistory = false;
         convSummary = '';
@@ -257,71 +300,53 @@
     }
 
     // 在报警大图上点击落点，构成检测区(ROI)多边形；坐标归一化到 0~1。
-    // 两种任务共用一条代码路径：写入【当前活动项 activeItem】(大模型=当前智能体 / 算法仓=当前算法)
-    // 绑定的池 ROI；若当前绑的是全屏，则先新建一个「检测区N」池项并把 activeItem 改绑到它。
+    // 绘制与算法/智能体【解耦】：直接往画布上点即可，落点写入「当前绘制中的检测区」；
+    // 没有绘制中的区域时自动新建一个「检测区N」池项。区域与算法的关联在下方对应关系表里勾选。
     function addRoiPoint(ev) {
-        if (!roiDrawActive || !roiSvgRef || !activeItem) return;
+        if (!roiDrawActive || !roiSvgRef) return;
         const rect = roiSvgRef.getBoundingClientRect();
         const x = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
         const y = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
         const pt = { x: +x.toFixed(4), y: +y.toFixed(4) };
-        let roiId = activeItem.roiId;
-        if (roiId === 'full') {
-            // 从全屏切到自定义检测区：新建区域并把当前项改绑到它
-            const n = config.rois.filter((r) => r.id !== 'full').length + 1;
+        let roiId = drawingRoiId;
+        if (!roiId || roiId === 'full' || !(config.rois || []).some((r) => r.id === roiId)) {
+            const n = (config.rois || []).filter((r) => r.id !== 'full').length + 1;
             roiId = 'roi_' + Date.now();
-            config.rois = [...config.rois, { id: roiId, name: `检测区${n}`, points: [] }];
-            activeItem.roiId = roiId;
-            if (!isAgentTask) activeItem.useFullFrame = false;  // 画了自定义区即取消「全屏」标记（仅算法仓项有此字段）
-            syncActiveItem();
+            config.rois = [...(config.rois || []), { id: roiId, name: `检测区${n}`, points: [] }];
+            drawingRoiId = roiId;
         }
         config.rois = config.rois.map((r) => r.id === roiId ? { ...r, points: [...r.points, pt] } : r);
     }
 
-    // 把当前活动项(activeItem)写回其所属数组，触发 Svelte 响应式刷新（两模式各自的数组）
-    function syncActiveItem() {
-        if (isAgentTask) config.agents = [...config.agents];
-        else config.algorithms = [...config.algorithms];
+    // 开始绘制一个全新的检测区（下一次落点时才真正建池项，避免留下空区域）
+    function startNewRoi() {
+        drawingRoiId = null;
+        roiDrawActive = true;
     }
 
+    // 续画/修改某个已有检测区（全屏项不可绘制）
+    function editRoi(id) {
+        if (id === 'full') return;
+        drawingRoiId = id;
+        roiDrawActive = true;
+    }
+
+    // 清除【当前绘制中】的检测区：整块删除，原本关联它的算法/智能体回落到全屏检测
     function clearRoi() {
-        if (!activeItem) return;
-        const roiId = activeItem.roiId;
-        if (roiId === 'full') {
-            showToast('全屏检测无需清除。请先选择/绘制自定义检测区。', 'info');
+        if (!drawingRoiId || drawingRoiId === 'full') {
+            showToast('当前没有正在绘制的检测区。点击画布即可开始绘制。', 'info');
             return;
         }
-        // 移除该自定义检测区并把当前项回落到全屏
-        config.rois = config.rois.filter((r) => r.id !== roiId);
-        activeItem.roiId = 'full';
-        if (!isAgentTask) activeItem.useFullFrame = false;
-        syncActiveItem();
-        showToast(isAgentTask ? '已清除该智能体的检测区，已回落为全屏检测。' : '已清除该算法的检测区，已回落为全屏检测。', 'info');
+        deleteRoi(drawingRoiId);
     }
 
-    // roiPoints -> SVG points 字符串（viewBox 800x500）：取当前活动项绑定的池 ROI
-    $: currentRoiPoints = (activeRoi?.points) || [];
+    // roiPoints -> SVG points 字符串（viewBox 800x500）：取【当前绘制中】的检测区
+    $: currentRoiPoints = drawingRoi?.points || [];
     $: roiSvgPoints = currentRoiPoints.map((p) => `${p.x * 800},${p.y * 500}`).join(' ');
 
     // 切换当前编辑的智能体
     function selectAgent(i) {
         config.activeAgentIndex = i;
-    }
-
-    // 当前活动项绑定某个 ROI（列表单选：改绑即切换）
-    function bindRoi(roiId) {
-        if (!activeItem) return;
-        activeItem.roiId = roiId;
-        if (!isAgentTask) activeItem.useFullFrame = (roiId === 'full');  // 绑到 full 即显式选择全屏
-        syncActiveItem();
-    }
-
-    // 算法仓任务：切「本算法使用全屏检测」——勾选即回落到 'full' 池项并置标记（供门禁放行）
-    function toggleActiveFullFrame(checked) {
-        if (!activeAlgorithm) return;
-        activeAlgorithm.useFullFrame = checked;
-        if (checked) activeAlgorithm.roiId = 'full';
-        config.algorithms = [...config.algorithms];
     }
 
     // 新增一个智能体槽位（≤4），默认取第一个未被占用的可选智能体
@@ -456,14 +481,20 @@
         const item = {
             kind,
             event_type: a.eventType || '', algo_cabin_name: a.algoCabinName || '', version: a.version || 'V2.0.0',
-            roiId: 'full', useFullFrame: false,
+            // 默认关联「全屏检测」（useFullFrame 与 roiId==='full' 恒等，部署门禁据此放行）
+            roiId: 'full', useFullFrame: true,
             maxTarget: defaultConfig.maxTarget, minTarget: defaultConfig.minTarget, yoloTarget: defaultConfig.yoloTarget,
+            yoloTargets: [...defaultConfig.yoloTargets],
             yoloHumanThresh: defaultConfig.yoloHumanThresh, yoloVehicleThresh: defaultConfig.yoloVehicleThresh,
             yoloNonMotorThresh: defaultConfig.yoloNonMotorThresh,
             intrusionDuration: defaultConfig.intrusionDuration, alarmInterval: defaultConfig.alarmInterval,
             cropUp: defaultConfig.cropUp, cropDown: defaultConfig.cropDown, cropLeft: defaultConfig.cropLeft, cropRight: defaultConfig.cropRight
         };
-        if (kind === 'combined') { item.agent_id = ''; item.agentType = ''; item.event_tag = ''; item.prompt = ''; }
+        if (kind === 'combined') {
+            item.agent_id = ''; item.agentType = ''; item.event_tag = '';
+            item.alarm_type = 'freeform'; item.prompt = ''; item.alarm_condition = null;
+            item.filter_enable = false; item.filter_keywords = '';
+        }
         config.algorithms = [...config.algorithms, item];
         config.activeAlgorithmIndex = config.algorithms.length - 1;
         config = { ...config, ...hoistItemParams(item) };
@@ -488,13 +519,22 @@
         } : a);
     }
 
-    // combined 算法项切换二次大模型：写 item.agent_id/agentType/event_tag；若为当前项同步顶层 agentType
+    // combined 算法项切换二次大模型：从设备智能体目录同步全量参数（event_tag/alarm_type/prompt/alarm_condition）；
+    // 换智能体即改用新智能体自身的报警条件（设备未给则置 null 交后端按 alarm_type 推导），并复位关键词过滤
     function changeAlgoAgent(i, eventId) {
         const src = availableAgents.find((a) => String(a.event_id) === String(eventId)) || {};
         config.algorithms = config.algorithms.map((a, idx) => idx === i ? {
-            ...a, agent_id: eventId, agentType: eventId, event_tag: src.event_tag || a.event_tag || String(eventId)
+            ...a, agent_id: eventId, agentType: eventId, event_tag: src.event_tag || String(eventId),
+            alarm_type: src.alarm_type || 'freeform', prompt: src.prompt || a.prompt || '',
+            alarm_condition: src.alarm_condition || null,
+            filter_enable: false, filter_keywords: ''
         } : a);
         if (i === (config.activeAlgorithmIndex || 0)) config.agentType = eventId;
+    }
+
+    // combined 算法项：就地修改二次大模型的某个参数（第③步「级联后置多模态 Agent」全量参数编辑）
+    function setAlgoAgentField(i, key, value) {
+        config.algorithms = config.algorithms.map((a, idx) => idx === i ? { ...a, [key]: value } : a);
     }
 
     // ── ROI 池：改名 / 删除（删除后引用它的算法/智能体回落全屏；全屏项为默认不可删/改） ──
@@ -507,6 +547,7 @@
         config.rois = config.rois.filter((r) => r.id !== id);
         config.agents = (config.agents || []).map((a) => a.roiId === id ? { ...a, roiId: 'full' } : a);
         config.algorithms = (config.algorithms || []).map((a) => a.roiId === id ? { ...a, roiId: 'full', useFullFrame: true } : a);
+        if (drawingRoiId === id) drawingRoiId = null;   // 删的是正在绘制的那块，画布回到「待新建」态
         showToast('已删除该检测区，关联项已回落为全屏检测。', 'info');
     }
 
@@ -532,15 +573,18 @@
         : (config.algorithms || []).map((a, i) => ({ i, kind: '小模型', label: algoLabel(a), note: '', roiId: a.roiId }));
     // 自定义检测区（不含默认「全屏检测」伪项，它没有几何形状、不可改名删除）
     $: customRois = (config.rois || []).filter((r) => r.id !== 'full');
-    // 仍是全屏检测（未绑定任何自定义区域）的项，表尾汇总提示用
-    $: fullFrameItems = boundItems.filter((it) => it.roiId === 'full' || !it.roiId);
-    // 画布叠加层：勾了「显示」、且不是当前正在编辑的那个区域
-    $: overlayRois = customRois.filter((r) => !hiddenRoiIds.has(r.id) && r.id !== activeItem?.roiId && (r.points || []).length >= 3);
+    // 对应关系表的完整行集：默认「全屏检测」置顶，其后是用户画出的自定义检测区
+    $: tableRois = [
+        (config.rois || []).find((r) => r.id === 'full') || { id: 'full', name: '全屏检测', points: [] },
+        ...customRois
+    ];
+    // 画布叠加层：勾了「显示」、且不是当前正在绘制的那个区域（当前区由主多边形单独高亮）
+    $: overlayRois = customRois.filter((r) => !hiddenRoiIds.has(r.id) && r.id !== drawingRoiId && (r.points || []).length >= 3);
 
-    // 表内勾选：把第 i 个算法/智能体绑到该检测区；取消勾选则回落全屏。
-    // 与 bindRoi 同语义（数据模型仍是「每项单绑一个检测区」），只是把隐式的「当前活动项」改为显式下标。
+    // 表内勾选：把第 i 个算法/智能体关联到该检测区；取消勾选则回落到默认「全屏检测」。
+    // 数据模型仍是「每项单绑一个检测区」，故一行内勾选即互斥切换（第②步唯一的关联入口）。
     function toggleItemRoi(i, roiId, checked) {
-        const target = checked ? roiId : 'full';
+        const target = (checked && roiId !== 'full') ? roiId : 'full';
         if (isAgentTask) {
             config.agents = config.agents.map((a, idx) => idx === i ? { ...a, roiId: target } : a);
         } else {
@@ -626,7 +670,7 @@
     // 面板三列参数（Phase 1 绑顶层 config）对应的键：多算法回填时把当前算法项的这些参数提到顶层，
     // 使单算法面板显示/编辑的是「当前算法」的真实值（下发时当前项也回读顶层，保持一致）。
     const PANEL_PARAM_KEYS = ['maxTarget', 'minTarget', 'yoloHumanThresh', 'yoloVehicleThresh',
-        'yoloNonMotorThresh', 'yoloTarget', 'intrusionDuration', 'alarmInterval',
+        'yoloNonMotorThresh', 'yoloTarget', 'yoloTargets', 'intrusionDuration', 'alarmInterval',
         'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'prompt', 'agentType'];
     function hoistItemParams(item) {
         const out = {};
@@ -639,13 +683,19 @@
     // - 旧单算法快照/模板（仅 event_type/algo_cabin_name/roiPoints/顶层阈值）→ 归一化为【单项】algorithms[] + 池。
     // 顶层参数键保留（Phase 1 三列面板仍绑顶层）；下发时当前项读顶层、其余项读各自 item（多算法原样 round-trip）。
     function normalizeWarehouseConfig(base, d) {
+        // 池里必须始终有默认「全屏检测」伪项（第②步对应关系表的默认关联行）
+        const withFull = (list) => ((list || []).some((r) => r.id === 'full')
+            ? list : [{ id: 'full', name: '全屏检测', points: [] }, ...(list || [])]);
+        // useFullFrame 与 roiId==='full' 恒等：老快照可能两者不一致，统一以 roiId 为准
+        const normItem = (it) => ({ ...it, roiId: it.roiId || 'full', useFullFrame: (it.roiId || 'full') === 'full' });
         if (Array.isArray(d.algorithms) && d.algorithms.length) {
-            const rois = (Array.isArray(d.rois) && d.rois.length) ? d.rois : [{ id: 'full', name: '全屏检测', points: [] }];
+            const rois = withFull((Array.isArray(d.rois) && d.rois.length) ? d.rois : []);
+            const algorithms = d.algorithms.map(normItem);
             const idx = d.activeAlgorithmIndex || 0;
-            const active = d.algorithms[idx] || d.algorithms[0];
+            const active = algorithms[idx] || algorithms[0];
             const out = {
                 ...base, ...d, ...hoistItemParams(active),
-                algorithms: d.algorithms, rois,
+                algorithms, rois,
                 activeAlgorithmIndex: idx, roiPoints: []
             };
             // combined：顶层 agentType 用 event_id（对齐 Step3 下拉选项与下发 agent_id，避免误用 event_tag）
@@ -656,19 +706,23 @@
         const pts = d.roiPoints || base.roiPoints || [];
         const rois = [{ id: 'full', name: '全屏检测', points: [] }];
         let roiId = 'full';
-        let useFullFrame = false;
         if (pts.length >= 3) { roiId = 'roi_1'; rois.push({ id: roiId, name: '检测区1', points: pts }); }
         const kind = (d.taskMode === 'combined') ? 'combined' : 'small';
-        const item = {
+        const item = normItem({
             kind,
             event_type: d.event_type || base.event_type || '',
             algo_cabin_name: d.algo_cabin_name || base.algo_cabin_name || '',
             version: d.version || 'V2.0.0',
-            roiId, useFullFrame
-        };
+            roiId
+        });
         if (kind === 'combined') {
             item.agent_id = d.agent_id || d.agentType || '';
             item.event_tag = d.event_tag || d.agentType || '';
+            item.alarm_type = d.alarm_type || 'freeform';
+            item.prompt = d.prompt || '';
+            item.alarm_condition = d.alarm_condition ?? null;
+            item.filter_enable = !!d.filter_enable;
+            item.filter_keywords = d.filter_keywords || '';
         }
         return {
             ...base, ...d,
@@ -791,7 +845,7 @@
         wizardStep = 1;
         panelView = 'editor';
         sceneImage = null;
-        await loadWarehouseCatalogs();
+        await loadWarehouseCatalogs(); // 加载算法目录与智能体目录，便于 Step1 增删换算法/智能体
         if (!(config.algorithms || []).length) addAlgorithmSlot();
         await loadSceneImage(null);
         showToast('已进入新建布控任务：请选择任务类型、通道与算法。', 'info');
@@ -890,17 +944,17 @@
             await deployAgentTask();
             return;
         }
-        // 强制 ROI 门禁（仅手动路径 templateApplied=false）：每条仓算法必须「画了 ≥3 点的检测区」或「显式勾选使用全屏」，
-        // 纯默认(roiId='full' 且未勾全屏)不放行。模板/对话路径(templateApplied=true)跳过此门禁，用模板自带 ROI 或全屏。
+        // 强制 ROI 门禁（仅手动路径 templateApplied=false）：每条仓算法必须关联了「默认全屏检测」或「已画 ≥3 点的自定义检测区」，
+        // 关联到一个点数不足的半成品区域不放行。模板/对话路径(templateApplied=true)跳过此门禁，用模板自带 ROI 或全屏。
         if (!templateApplied) {
             const algos = config.algorithms || [];
             const blocked = algos.some((item) => {
-                if (item.useFullFrame) return false;
+                if ((item.roiId || 'full') === 'full') return false;   // 默认全屏检测：直接放行
                 const pts = (config.rois.find((r) => r.id === item.roiId)?.points) || [];
                 return pts.length < 3;
             });
             if (!algos.length || blocked) {
-                showToast('请先为每个算法绘制检测区(ROI)或勾选使用全屏，再部署。', 'warning');
+                showToast('存在关联了未画完检测区(至少3个点)的算法，请在第二步补全或改回全屏检测。', 'warning');
                 return;
             }
         }
@@ -923,11 +977,13 @@
             const p = (i === activeIdx) ? config : item;   // 激活项读顶层面板值，其余项读各自 item
             // 三阈值 → 设备单阈值：按「前置检测目标」取对应阈值；目标类型对齐后端 _target_type_to_yolo。
             const yoloTarget = p.yoloTarget ?? config.yoloTarget;
-            const threshold = yoloTarget === 'vehicle' ? p.yoloVehicleThresh
+            const activeThresh = yoloTarget === 'vehicle' ? p.yoloVehicleThresh
                 : yoloTarget === 'human' ? p.yoloHumanThresh
                 : p.yoloNonMotorThresh;
-            const target_types = yoloTarget === 'vehicle' ? ['VEHICLE'] : ['PERSON'];
-            const roiPoints = item.useFullFrame ? [] : ((config.rois.find((r) => r.id === item.roiId)?.points) || []);
+            // 检测目标支持多选：下发 item/面板的 yoloTargets；老配置只有单值 yoloTarget 时按它推导
+            const picked = (Array.isArray(p.yoloTargets) && p.yoloTargets.length) ? p.yoloTargets : null;
+            const target_types = picked || (yoloTarget === 'vehicle' ? ['VEHICLE'] : yoloTarget === 'human' ? ['PERSON'] : ['NON_MOTOR']);
+            const roiPoints = ((item.roiId || 'full') === 'full') ? [] : ((config.rois.find((r) => r.id === item.roiId)?.points) || []);
             const kind = item.kind || 'small';
             const algo = {
                 kind,
@@ -935,8 +991,8 @@
                 algo_cabin_name: item.algo_cabin_name || config.algo_cabin_name,
                 version: item.version || config.version || 'V2.0.0',
                 target_types,
-                threshold: Number(threshold),
-                // 面板「最大/最小目标限制」为整数目标个数（对应设备 targetMax/targetMin），兜底取整下发。
+                threshold: Number(activeThresh),
+                // 目标大小（设备 targetMax/targetMin）：最小 0~100、最大 50~100，取整下发。
                 target_max: Math.max(0, Math.round(Number(p.maxTarget) || 0)),
                 target_min: Math.max(0, Math.round(Number(p.minTarget) || 0)),
                 duration: Math.round(Number(p.intrusionDuration)),
@@ -944,15 +1000,21 @@
                 roiPoints
             };
             if (kind === 'combined') {
-                // 小+大：追加扩图策略（target_expand 仅小+大生效）+ 二次大模型智能体标识
+                // 小+大：追加扩图策略（target_expand 仅小+大生效）+ 二次大模型全量参数
                 algo.target_expand = {
                     top: Number(p.cropUp), bottom: Number(p.cropDown),
                     left: Number(p.cropLeft), right: Number(p.cropRight)
                 };
                 algo.agent_id = p.agentType || item.agent_id;
-                algo.event_tag = (i === activeIdx) ? (config.agentType || '') : (item.event_tag || item.agentType || '');
+                // event_tag/alarm_type/alarm_condition/filter_* 不在顶层面板键里，恒读各自 item（第③步就地编辑）
+                algo.event_tag = item.event_tag || '';
+                algo.alarm_type = item.alarm_type || 'freeform';
                 algo.prompt = p.prompt || '';
-                algo.alarm_condition = null;
+                algo.alarm_condition = item.alarm_condition || null;
+                // 关键词过滤仅描述型(freeform)有意义，判断型强制关闭（与 deployAgentTask/后端 _enrich_* 一致）
+                const freeform = (item.alarm_type || 'freeform') === 'freeform';
+                algo.filter_enable = freeform && !!item.filter_enable;
+                algo.filter_keywords = freeform ? (item.filter_keywords || '') : '';
             }
             return algo;
         });
@@ -1614,12 +1676,12 @@
                 </div>
             {/if}
 
-            <!-- 当前编辑对象切换器（第②③步共用）：第②步为该项绘制/关联 ROI，第③步配置该项详情参数 -->
-            {#if monitorActive && wizardStep !== 1}
+            <!-- 当前编辑对象切换器（仅第③步）：第②步的绘制已与算法解耦，关联在对应关系表里完成 -->
+            {#if monitorActive && wizardStep === 3}
                 <div class="bg-slate-950/60 p-3 rounded-2xl border border-slate-800">
                     <div class="flex items-center justify-between mb-2">
                         <span class="text-[11px] font-bold text-slate-200 flex items-center"><i class="fa-solid fa-hand-pointer mr-1.5 text-indigo-400"></i>当前编辑对象（{isAgentTask ? '智能体' : '算法'}）</span>
-                        <span class="text-[9px] text-slate-500">{wizardStep === 2 ? '为该项绘制 / 关联检测区' : '配置该项详情参数'}</span>
+                        <span class="text-[9px] text-slate-500">配置该项详情参数</span>
                     </div>
                     <div class="flex flex-wrap gap-1.5">
                         {#if isAgentTask}
@@ -1641,7 +1703,7 @@
                 </div>
             {/if}
 
-            {#if !monitorActive || wizardStep === 2 || (wizardStep === 3 && isCombinedTask)}
+            {#if !monitorActive || wizardStep === 2}
             <!-- ② ROI 绘制：视频/图片画布（未激活时为占位提示） -->
             <div class="space-y-4">
                 {#if !monitorActive || wizardStep === 2}
@@ -1662,7 +1724,11 @@
                             <button on:click={toggleRoi} class="px-2.5 py-1 rounded border transition-colors {roiDrawActive ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-900 hover:bg-indigo-950 hover:text-indigo-400 border-slate-800 hover:border-indigo-500/30'}">
                                 <i class="fa-solid fa-draw-polygon mr-1"></i>画制检测区 (ROI)
                             </button>
-                            <button on:click={clearRoi} class="px-2.5 py-1 rounded border bg-slate-900 hover:bg-rose-950 hover:text-rose-400 border-slate-800 hover:border-rose-500/30 transition-colors">
+                            <button on:click={startNewRoi} title="结束当前区域，下一次点击画布开始绘制新的检测区"
+                                    class="px-2.5 py-1 rounded border bg-slate-900 hover:bg-indigo-950 hover:text-indigo-400 border-slate-800 hover:border-indigo-500/30 transition-colors">
+                                <i class="fa-solid fa-plus mr-1"></i>绘制新区域
+                            </button>
+                            <button on:click={clearRoi} title="删除当前正在绘制的检测区" class="px-2.5 py-1 rounded border bg-slate-900 hover:bg-rose-950 hover:text-rose-400 border-slate-800 hover:border-rose-500/30 transition-colors">
                                 <i class="fa-solid fa-eraser mr-1"></i>清除
                             </button>
                             <span class="px-2 py-1 bg-slate-900 rounded border border-slate-800 font-mono">1080P</span>
@@ -1674,7 +1740,7 @@
                             <div class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs flex-col space-y-2 px-4 text-center">
                                 <i class="fa-solid fa-video-slash text-4xl text-slate-700"></i>
                                 <span class="text-slate-400 font-medium">请在左侧对话框下发包含小模型与Agent的级联布控指令</span>
-                                <p class="text-[10px] text-slate-600">加载后自动渲染小模型检测框与裁剪扩图边界</p>
+                                <p class="text-[10px] text-slate-600">加载后自动渲染小模型检测框与已配置检测区</p>
                             </div>
                         {:else}
                             <img src={sceneImage || CAM} alt="" class="w-full h-full object-cover" />
@@ -1697,7 +1763,7 @@
                             </svg>
                             {#if roiDrawActive}
                                 <div class="absolute top-2 left-2 bg-indigo-600/90 text-white text-[10px] font-bold px-2 py-1 rounded shadow">
-                                    <i class="fa-solid fa-draw-polygon mr-1"></i>点击画点绘制检测区（已 {currentRoiPoints.length} 点）{#if isAgentTask && activeAgent}· 当前：{activeAgent.event_tag || '智能体'}{:else if !isAgentTask && activeAlgorithm}· 当前：{activeAlgorithm.event_type || '算法'}{/if}
+                                    <i class="fa-solid fa-draw-polygon mr-1"></i>{drawingRoi ? `正在绘制：${drawingRoi.name}（已 ${currentRoiPoints.length} 点）` : '点击画面开始绘制新的检测区'}
                                 </div>
                             {/if}
                             {#if isCombinedTask}
@@ -1713,7 +1779,8 @@
                 {/if}
 
                 {#if monitorActive && wizardStep === 2}
-                    <!-- ROI 区域管理与算法绑定对应关系表：行=检测区，列=第①步勾选的算法/智能体。
+                    <!-- ROI 区域管理与算法绑定对应关系表：行=检测区（首行为默认「全屏检测」），列=第①步勾选的算法/智能体。
+                         这里是【唯一】的关联入口：画布只负责画区域，画完在本表勾选该区域要跑哪些算法。
                          数据模型仍是「每个算法/智能体单绑一个检测区」，故同一列只会在一行呈勾选态（在别行勾选即改绑）。 -->
                     <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
                         <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
@@ -1733,31 +1800,48 @@
                                         <th class="px-3 py-2 font-medium">ROI 区域名称 (支持编辑)</th>
                                         <th class="px-3 py-2 font-medium w-24">几何类型</th>
                                         <th class="px-3 py-2 font-medium">关联绑定的算法 / 智能体 (源自第一步勾选)</th>
-                                        <th class="px-3 py-2 font-medium w-20 text-right">操作</th>
+                                        <th class="px-3 py-2 font-medium w-28 text-right">操作</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {#each customRois as roi (roi.id)}
-                                        <tr class="border-t border-slate-800 hover:bg-slate-900/40 transition-colors">
+                                    {#each tableRois as roi (roi.id)}
+                                        {@const isFull = roi.id === 'full'}
+                                        <tr class="border-t border-slate-800 hover:bg-slate-900/40 transition-colors {roi.id === drawingRoiId ? 'bg-indigo-950/30' : ''}">
                                             <td class="px-3 py-3 align-middle">
-                                                <input type="checkbox" checked={!hiddenRoiIds.has(roi.id)} on:change={() => toggleRoiVisible(roi.id)}
-                                                       title="是否在画面上叠加显示该区域（仅预览，不影响部署）"
-                                                       class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-700 rounded cursor-pointer" />
+                                                {#if isFull}
+                                                    <i class="fa-solid fa-expand text-slate-600 text-[11px]" title="全屏检测覆盖整个画面，无需叠加预览"></i>
+                                                {:else}
+                                                    <input type="checkbox" checked={!hiddenRoiIds.has(roi.id)} on:change={() => toggleRoiVisible(roi.id)}
+                                                           title="是否在画面上叠加显示该区域（仅预览，不影响部署）"
+                                                           class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-700 rounded cursor-pointer" />
+                                                {/if}
                                             </td>
                                             <td class="px-3 py-3 align-middle">
-                                                <input type="text" value={roi.name} on:input={(e) => renameRoi(roi.id, e.target.value)} placeholder="检测区名称"
-                                                       class="w-44 bg-slate-950 border border-indigo-500/40 text-slate-100 rounded px-2 py-1.5 text-[11px] font-bold focus:border-indigo-500 focus:outline-none" />
+                                                {#if isFull}
+                                                    <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-200">
+                                                        {roi.name}
+                                                        <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[9px] font-medium text-slate-500">默认</span>
+                                                    </span>
+                                                {:else}
+                                                    <input type="text" value={roi.name} on:input={(e) => renameRoi(roi.id, e.target.value)} placeholder="检测区名称"
+                                                           class="w-44 bg-slate-950 border border-indigo-500/40 text-slate-100 rounded px-2 py-1.5 text-[11px] font-bold focus:border-indigo-500 focus:outline-none" />
+                                                {/if}
                                             </td>
                                             <td class="px-3 py-3 align-middle">
-                                                <span class="text-[11px] text-slate-400">多边形</span>
-                                                <span class="text-[9px] text-slate-600 font-mono ml-1">{(roi.points || []).length}点</span>
+                                                {#if isFull}
+                                                    <span class="text-[11px] text-slate-400">全画面</span>
+                                                {:else}
+                                                    <span class="text-[11px] text-slate-400">多边形</span>
+                                                    <span class="text-[9px] font-mono ml-1 {(roi.points || []).length >= 3 ? 'text-slate-600' : 'text-amber-500'}">{(roi.points || []).length}点</span>
+                                                {/if}
                                             </td>
                                             <td class="px-3 py-3 align-middle">
                                                 <div class="flex items-center flex-wrap gap-2">
                                                     {#each boundItems as it (it.i)}
-                                                        <label class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-colors text-[10px] font-bold {it.roiId === roi.id ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-200' : 'bg-slate-900 border-slate-800 text-slate-500 hover:border-indigo-500/30'}">
-                                                            <input type="checkbox" checked={it.roiId === roi.id}
-                                                                   on:change={(e) => toggleItemRoi(it.i, roi.id, e.target.checked)}
+                                                        {@const bound = isFull ? ((it.roiId || 'full') === 'full') : (it.roiId === roi.id)}
+                                                        <label class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border cursor-pointer transition-colors text-[10px] font-bold {bound ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-200' : 'bg-slate-900 border-slate-800 text-slate-500 hover:border-indigo-500/30'}">
+                                                            <input type="checkbox" checked={bound}
+                                                                   on:change={(e) => { toggleItemRoi(it.i, roi.id, e.target.checked); if (isFull) e.target.checked = true; }}
                                                                    class="w-3 h-3 text-indigo-600 bg-slate-950 border-slate-700 rounded cursor-pointer" />
                                                             <span class="whitespace-nowrap">{it.kind}: {it.label}{it.note ? `（${it.note}）` : ''}</span>
                                                         </label>
@@ -1766,18 +1850,19 @@
                                                     {/each}
                                                 </div>
                                             </td>
-                                            <td class="px-3 py-3 align-middle text-right">
-                                                <button type="button" on:click={() => deleteRoi(roi.id)} title="删除该检测区"
-                                                        class="text-[11px] text-rose-500 hover:text-rose-400 font-medium whitespace-nowrap">
-                                                    <i class="fa-solid fa-trash-can mr-1"></i>删除
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    {:else}
-                                        <tr class="border-t border-slate-800">
-                                            <td colspan="5" class="px-3 py-6 text-center text-[11px] text-slate-500">
-                                                <i class="fa-solid fa-draw-polygon mr-1.5 text-slate-700"></i>
-                                                暂无自定义检测区：先在上方选中一个{isAgentTask ? '智能体' : '算法'}，再点「画制检测区 (ROI)」在画面上绘制
+                                            <td class="px-3 py-3 align-middle text-right whitespace-nowrap">
+                                                {#if isFull}
+                                                    <span class="text-[10px] text-slate-600">不可删除</span>
+                                                {:else}
+                                                    <button type="button" on:click={() => editRoi(roi.id)} title="在画布上续画/修改该检测区"
+                                                            class="text-[11px] mr-2 font-medium {roi.id === drawingRoiId ? 'text-indigo-300' : 'text-indigo-500 hover:text-indigo-400'}">
+                                                        <i class="fa-solid fa-pen-to-square mr-1"></i>{roi.id === drawingRoiId ? '绘制中' : '继续绘制'}
+                                                    </button>
+                                                    <button type="button" on:click={() => deleteRoi(roi.id)} title="删除该检测区"
+                                                            class="text-[11px] text-rose-500 hover:text-rose-400 font-medium">
+                                                        <i class="fa-solid fa-trash-can mr-1"></i>删除
+                                                    </button>
+                                                {/if}
                                             </td>
                                         </tr>
                                     {/each}
@@ -1785,29 +1870,11 @@
                             </table>
                         </div>
 
-                        <!-- 表尾：仍走全屏检测的项 + 算法仓任务的「全屏检测」开关（保留原控件） -->
-                        <div class="flex items-center justify-between gap-3 mt-3 flex-wrap">
-                            <div class="flex items-center gap-1.5 flex-wrap text-[10px] text-slate-500">
-                                <span>全屏检测（未绑定区域）：</span>
-                                {#each fullFrameItems as it (it.i)}
-                                    <span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 font-medium">{it.kind}: {it.label}</span>
-                                {:else}
-                                    <span class="text-slate-600">无</span>
-                                {/each}
-                            </div>
-                            {#if !isAgentTask}
-                                <label class="flex items-center space-x-1.5 cursor-pointer text-[10px] text-slate-300 shrink-0">
-                                    <input type="checkbox" checked={!!activeAlgorithm?.useFullFrame} on:change={(e) => toggleActiveFullFrame(e.target.checked)} disabled={!activeAlgorithm}
-                                           class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-700 rounded cursor-pointer" />
-                                    <span>当前算法（{activeAlgorithm ? algoLabel(activeAlgorithm) : '未选择'}）使用全屏检测</span>
-                                </label>
-                            {/if}
-                        </div>
-
                         <p class="text-[9px] text-slate-500 mt-2 leading-relaxed">
-                            先在上方选中一个{isAgentTask ? '智能体' : '算法'}，再点「画制检测区」在画面上绘制；绘制后自动新增一行并绑定到当前对象。区域名可直接改，删除后关联项回落为全屏检测。
-                            每个{isAgentTask ? '智能体' : '算法'}同时只能绑定一个区域，在别行勾选即改绑到该行。
-                            {#if !isAgentTask}手动配置需为每个算法绘制检测区或勾选「使用全屏检测」后方可部署；套用模板则跳过此限制。{/if}
+                            画布上直接点击即可绘制检测区（无需先选算法），画完自动新增一行；点「绘制新区域」开始下一块，行内「继续绘制」可续画已有区域。
+                            区域名可直接改，删除后关联项自动回落到默认「全屏检测」。
+                            每个{isAgentTask ? '智能体' : '算法'}同时只能关联一个区域，在别行勾选即改绑到该行；默认全部关联「全屏检测」。
+                            {#if !isAgentTask}手动配置时，关联了未画完（少于 3 点）检测区的算法不可部署；套用模板则跳过此限制。{/if}
                         </p>
                     </div>
 
@@ -1824,34 +1891,6 @@
                     </div>
                 {/if}
 
-                <!-- 扩图预览（随第③步详情参数一起展示：与「目标扩图倍数」配置同屏） -->
-                {#if monitorActive && wizardStep === 3 && isCombinedTask}
-                    <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
-                        <div class="flex items-center justify-between mb-3">
-                            <div class="flex items-center space-x-2">
-                                <span class="p-1 bg-emerald-500/10 text-emerald-400 rounded"><i class="fa-solid fa-crop text-xs"></i></span>
-                                <span class="font-bold text-xs text-slate-200">前置轻量算法裁切扩图流 (送检小图预览)</span>
-                            </div>
-                            <span class="text-[10px] text-slate-500 font-mono">Size: 320x450 (JPG)</span>
-                        </div>
-                        <div class="grid grid-cols-12 gap-4 items-center">
-                            <div class="col-span-4 bg-slate-900 p-2 rounded-xl border border-slate-800 flex justify-center relative overflow-hidden">
-                                <img src={CROP} alt="" class="h-28 object-cover rounded border border-slate-700" />
-                                <div class="absolute bottom-2 left-2 bg-slate-950/80 text-[9px] text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/20 font-mono">裁剪特写</div>
-                            </div>
-                            <div class="col-span-8 space-y-2">
-                                <p class="text-xs text-slate-400 leading-relaxed">
-                                    <i class="fa-solid fa-circle-info text-indigo-400 mr-1"></i>
-                                    <b>边缘协同机制</b>：端侧 YOLO 小模型敏捷捕获运动目标，触发过滤规则后按倍数裁切高分辨率小图，仅将此<b>“局部特写图”</b>送往大模型 Agent 精细推理，使边缘布控的<b>带宽与算力成本降低 85%</b>。
-                                </p>
-                                <div class="flex space-x-2 text-[10px]">
-                                    <span class="bg-indigo-950 text-indigo-300 border border-indigo-500/20 px-2 py-1 rounded font-mono">输入大小: ~25KB</span>
-                                    <span class="bg-emerald-950 text-emerald-300 border border-emerald-500/20 px-2 py-1 rounded font-mono">大模型推理耗时: ~120ms</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                {/if}
             </div>
             {/if}
 
@@ -1918,49 +1957,63 @@
                         {/if}
                     {:else}
                     <div class="grid grid-cols-1 {isCombinedTask ? 'xl:grid-cols-3' : ''} gap-4 text-xs items-start">
-                        <!-- 1. 前置轻量级算法（当前算法项的阈值/目标/时长/冷却；面板绑顶层 config.*，切项时由 selectAlgorithm 写回/提取） -->
+                        <!-- 1. 前置轻量级算法（当前算法项的时长/目标大小/阈值/目标类型；面板绑顶层 config.*，切项时由 selectAlgorithm 写回/提取） -->
                         <div class="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 space-y-3 h-full">
                             <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                                 <span class="font-extrabold text-amber-400 flex items-center"><i class="fa-solid fa-microchip mr-1.5"></i> 1. 前置轻量级算法配置</span>
                                 <span class="text-[9px] text-slate-500">端侧低算力常驻运行</span>
                             </div>
-                            <!-- 最大/最小目标限制对应设备 targetMax/targetMin：整数目标个数，不是 0~1 比例 -->
+                            <!-- 延迟报警(duration) / 报警间隔(cooldownDuration)：单位秒 -->
                             <div class="grid grid-cols-2 gap-3">
                                 <div>
-                                    <label class="block text-[10px] text-slate-400 mb-1">最大目标限制 (个)</label>
-                                    <input type="number" min="0" step="1" bind:value={config.maxTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
-                                </div>
-                                <div>
-                                    <label class="block text-[10px] text-slate-400 mb-1">最小目标限制 (个)</label>
-                                    <input type="number" min="0" step="1" bind:value={config.minTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
-                                </div>
-                            </div>
-                            <!-- 设备侧一条规则只有一个 threshold：面板只暴露「当前检测目标」对应的那一个阈值，避免三条滑杆里两条无效 -->
-                            <div class="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label class="block text-[10px] text-slate-400 mb-1">前置检测目标</label>
-                                    <select bind:value={config.yoloTarget} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px]">
-                                        <option value="human">人员 (人体检测)</option>
-                                        <option value="vehicle">车辆</option>
-                                        {#if config.yoloTarget === 'any'}
-                                            <option value="any">其它目标（设备原值）</option>
-                                        {/if}
-                                    </select>
-                                </div>
-                                <div>
-                                    <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">{config.yoloTarget === 'vehicle' ? '车辆' : config.yoloTarget === 'human' ? '人体' : '其它目标'}检测阈值</label><span class="font-mono text-amber-400">{config[threshKey]}</span></div>
-                                    <input type="range" min="0.1" max="0.9" step="0.01" value={config[threshKey]} on:input={(e) => setThresh(e.target.value)} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
-                                </div>
-                            </div>
-                            <div class="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label class="block text-[10px] text-slate-400 mb-1">入侵时长检测 (单位:秒)</label>
-                                    <input type="number" bind:value={config.intrusionDuration} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
+                                    <label class="block text-[10px] text-slate-400 mb-1">延迟报警 (单位:秒)</label>
+                                    <input type="number" min="0" step="1" bind:value={config.intrusionDuration} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
                                 </div>
                                 <div>
                                     <label class="block text-[10px] text-slate-400 mb-1">报警间隔时长 (单位:秒)</label>
-                                    <input type="number" bind:value={config.alarmInterval} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
+                                    <input type="number" min="0" step="1" bind:value={config.alarmInterval} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
                                 </div>
+                            </div>
+                            <!-- 目标大小（设备 targetMin/targetMax）：最小 0~100、最大 50~100 -->
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[10px] text-slate-400 mb-1">最小目标大小 (0-100)</label>
+                                    <input type="number" min="0" max="100" step="1" bind:value={config.minTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] text-slate-400 mb-1">最大目标 (50-100)</label>
+                                    <input type="number" min="50" max="100" step="1" bind:value={config.maxTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
+                                </div>
+                            </div>
+                            <!-- 设备侧一条规则只有一个 threshold：按「主目标」(已勾选的第一个)取对应阈值字段 -->
+                            <div>
+                                <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">检测阈值</label><span class="font-mono text-amber-400">{config[threshKey]}</span></div>
+                                <input type="range" min="0.1" max="0.9" step="0.01" value={config[threshKey]} on:input={(e) => setThresh(e.target.value)} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                            </div>
+                            <!-- 检测目标：多目标勾选（设备 targetTypes）；首个勾选项即主目标，决定上面用哪条阈值 -->
+                            <div class="relative">
+                                <label class="block text-[10px] text-slate-400 mb-1">检测目标（可多选）</label>
+                                <button type="button" on:click={() => (targetPickerOpen = !targetPickerOpen)}
+                                        class="w-full flex items-center justify-between gap-2 bg-slate-950 border border-slate-800 hover:border-amber-500/50 text-slate-200 rounded p-1.5 text-[11px] text-left transition-colors">
+                                    <span class="truncate">{selectedTargets.map(targetTypeLabel).join('、') || '请选择检测目标'}</span>
+                                    <i class="fa-solid fa-chevron-down text-[9px] text-slate-500 shrink-0"></i>
+                                </button>
+                                {#if targetPickerOpen}
+                                    <!-- 透明遮罩：点击面板外即收起下拉 -->
+                                    <button type="button" aria-label="关闭检测目标选择" class="fixed inset-0 z-10 cursor-default" on:click={() => (targetPickerOpen = false)}></button>
+                                    <div class="absolute z-20 mt-1 w-full bg-slate-950 border border-slate-800 rounded shadow-lg shadow-black/40 p-1 max-h-44 overflow-y-auto">
+                                        {#each targetTypeOptions as tt}
+                                            <label class="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-slate-900 text-[11px] {selectedTargets.includes(tt) ? 'text-amber-400 font-bold' : 'text-slate-300'}">
+                                                <input type="checkbox" checked={selectedTargets.includes(tt)}
+                                                       on:change={(e) => toggleTargetType(tt, e.target.checked)}
+                                                       class="w-3 h-3 text-amber-500 bg-slate-950 border-slate-700 rounded cursor-pointer" />
+                                                <span class="truncate">{targetTypeLabel(tt)}</span>
+                                                <span class="ml-auto text-[9px] font-mono text-slate-600">{tt}</span>
+                                            </label>
+                                        {/each}
+                                    </div>
+                                {/if}
+                                <p class="text-[9px] text-slate-500 mt-1">首个勾选目标为主目标（决定上方检测阈值取用的字段）。</p>
                             </div>
                         </div>
 
@@ -1980,7 +2033,7 @@
                             <p class="text-[9px] text-slate-500 leading-relaxed text-center">扩图能够为 VLM 深度智能体提供足够的环境上下文关系，防止小图特征过窄。</p>
                         </div>
 
-                        <!-- 3. 后置 Agent：小+大任务的「二次大模型」——下拉取设备智能体目录(availableAgents)，写入当前算法项 -->
+                        <!-- 3. 后置 Agent：小+大任务的「二次大模型」——下拉取设备智能体目录(availableAgents)，全量参数写入当前算法项 -->
                         <div class="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 space-y-3 h-full">
                             <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                                 <span class="font-extrabold text-indigo-400 flex items-center"><i class="fa-solid fa-brain mr-1.5"></i> 3. 级联后置多模态 Agent</span>
@@ -1999,10 +2052,63 @@
                                     <p class="text-[9px] text-amber-500/80 mt-1">未取到设备智能体目录（设备离线时不可选）。</p>
                                 {/if}
                             </div>
+                            <!-- 智能体标识：event_id 为设备侧唯一 ID（只读）；event_tag 为报警名称（可改，随报警下发） -->
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[10px] text-slate-400 mb-1">智能体 ID (event_id)</label>
+                                    <input type="text" value={activeAlgorithm?.agent_id || config.agentType || ''} readonly
+                                           class="w-full bg-slate-950/60 border border-slate-800 text-slate-500 rounded p-1.5 text-[11px] font-mono cursor-not-allowed" />
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] text-slate-400 mb-1">报警名称 (event_tag)</label>
+                                    <input type="text" value={activeAlgorithm?.event_tag || ''} placeholder="如：跌倒检测"
+                                           on:input={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'event_tag', e.target.value)}
+                                           class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-indigo-500 text-[11px]" />
+                                </div>
+                            </div>
+                            <!-- 报警类型：描述型(freeform)输出自然语言描述、走关键词过滤；判断型(yesno)输出是/否、走报警条件 -->
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-1">报警类型 (alarm_type)</label>
+                                <select value={activeAlgorithm?.alarm_type || 'freeform'}
+                                        on:change={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'alarm_type', e.target.value)}
+                                        class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-indigo-500 text-[11px]">
+                                    <option value="freeform">描述型（freeform）· 输出自然语言描述</option>
+                                    <option value="yesno">判断型（yesno）· 输出是 / 否</option>
+                                </select>
+                            </div>
                             <div>
                                 <div class="flex justify-between items-center mb-1"><label class="text-[10px] text-slate-400">智能体大模型视觉推理 Prompt 策略</label><span class="text-[9px] text-slate-600">Markdown语义控制</span></div>
                                 <textarea bind:value={config.prompt} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="等待指令注入..."></textarea>
                             </div>
+                            {#if (activeAlgorithm?.alarm_type || 'freeform') === 'freeform'}
+                                <!-- 描述型：关键词过滤（filter_enable/filter_keywords），命中关键词才上报 -->
+                                <div class="pt-1 border-t border-slate-800/60">
+                                    <div class="flex items-center justify-between">
+                                        <label class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-filter mr-1.5 text-indigo-400"></i>条件判断（属性分析）</label>
+                                        <input type="checkbox" checked={!!activeAlgorithm?.filter_enable}
+                                               on:change={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'filter_enable', e.target.checked)}
+                                               class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
+                                    </div>
+                                    {#if activeAlgorithm?.filter_enable}
+                                        <input type="text" value={activeAlgorithm?.filter_keywords || ''}
+                                               on:input={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'filter_keywords', e.target.value)}
+                                               placeholder="过滤条件关键词，例如：红色上衣 / 未戴安全帽"
+                                               class="mt-2 w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]" />
+                                    {/if}
+                                    <p class="text-[9px] text-slate-500 mt-1">仅描述型生效：大模型描述命中关键词才上报告警。</p>
+                                </div>
+                            {:else}
+                                <!-- 判断型(yesno)：报警条件 alarm_condition —— 勾选=仅「是」报警(only_yes)，不勾=是/否都报警(none) -->
+                                <div class="pt-1 border-t border-slate-800/60">
+                                    <label class="flex items-center justify-between cursor-pointer">
+                                        <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-check mr-1.5 text-indigo-400"></i>仅在判定为「是」时报警</span>
+                                        <input type="checkbox" checked={(activeAlgorithm?.alarm_condition || '') === 'only_yes'}
+                                               on:change={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'alarm_condition', e.target.checked ? 'only_yes' : 'none')}
+                                               class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
+                                    </label>
+                                    <p class="text-[9px] text-slate-500 mt-1">不勾选则是 / 否两种判定都会上报（alarm_condition=none）。</p>
+                                </div>
+                            {/if}
                         </div>
                         {/if}
                     </div>

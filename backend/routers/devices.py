@@ -181,6 +181,7 @@ async def _enrich_warehouse_algorithms(
     """算法仓多算法逐项富化（创建/编辑共用）：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm。
 
     仅当存在『小+大』算法时才拉设备智能体列表（纯小模型无需触网）；智能体不存在报 400。
+    combined 的关键词过滤沿用 _enrich_agent_items 语义：仅描述型(freeform)生效，其余强制关闭。
     """
     has_combined = any((a.kind or "small") == "combined" for a in algorithms)
     index = await _index_device_agents(client, device_obj, db) if has_combined else {}
@@ -195,12 +196,16 @@ async def _enrich_warehouse_algorithms(
                 raise HTTPException(
                     status_code=400,
                     detail=f"设备上不存在智能体算法「{item.event_tag or item.agent_id}」，请先在『智能体资产库』新建。")
+            alarm_type = item.alarm_type or dev_agent.get("alarm_type") or "freeform"
+            is_attr = (alarm_type or "").lower() == "freeform"
             agent_llm = tb.build_agent_llm_param(
                 {
                     **dev_agent,
                     "event_id": item.agent_id,
                     "event_tag": item.event_tag or dev_agent.get("event_tag") or str(item.agent_id),
-                    "alarm_type": item.alarm_type or dev_agent.get("alarm_type") or "freeform",
+                    "alarm_type": alarm_type,
+                    "filter_enable": bool(item.filter_enable) if is_attr else False,
+                    "filter_keywords": item.filter_keywords if is_attr else "",
                 },
                 prompt=item.prompt or None,
                 alarm_condition=item.alarm_condition,
@@ -309,12 +314,16 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
             raise HTTPException(
                 status_code=400,
                 detail=f"设备上不存在智能体算法「{payload.event_tag or payload.agent_id}」，请先在『智能体资产库』新建。")
+        alarm_type = payload.alarm_type or dev_agent.get("alarm_type") or "freeform"
+        is_attr = (alarm_type or "").lower() == "freeform"
         agent_llm = tb.build_agent_llm_param(
             {
                 **dev_agent,
                 "event_id": payload.agent_id,
                 "event_tag": payload.event_tag or dev_agent.get("event_tag") or str(payload.agent_id),
-                "alarm_type": payload.alarm_type or dev_agent.get("alarm_type") or "freeform",
+                "alarm_type": alarm_type,
+                "filter_enable": bool(payload.filter_enable) if is_attr else False,
+                "filter_keywords": payload.filter_keywords if is_attr else "",
             },
             prompt=payload.prompt or None,
             alarm_condition=payload.alarm_condition,

@@ -88,7 +88,8 @@ class WarehouseAlgorithmItem(BaseModel):
     kind：'small' 纯小模型 / 'combined' 小+大（挂二次大模型 agentLLMParam）。
     算法身份 = (algo_cabin_name, event_type)；同仓 event_type 不得重复（设备按仓覆盖规则）。
     roiPoints：本算法自己的归一化多边形点 [{x,y}]，为空表示全画面检测（逐算法各自一个 ROI）。
-    combined 专用：agent_id 必填，其余智能体字段缺省沿用设备端该智能体自身配置；target_expand 为扩图策略。
+    combined 专用：agent_id 必填，其余智能体字段缺省沿用设备端该智能体自身配置；target_expand 为扩图策略；
+    filter_enable/filter_keywords 仅描述型(freeform)智能体有意义，其余下发时强制关闭。
     """
     kind: str = "small"
     event_type: str
@@ -107,6 +108,8 @@ class WarehouseAlgorithmItem(BaseModel):
     alarm_type: str = "freeform"
     prompt: str = ""
     alarm_condition: Optional[str] = None
+    filter_enable: bool = False
+    filter_keywords: str = ""
     target_expand: Optional[dict] = None
 
 class WarehouseTaskDeploy(BaseModel):

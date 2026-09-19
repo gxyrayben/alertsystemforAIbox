@@ -181,7 +181,7 @@ def build_rule(
         "level": "ALARM_LEVEL",
     }
     if agent_llm:
-        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm}
+        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm} ### 这里不对 gxyrayben 
         extend_params["analysis_mode"] = "full_analysis"
         extend_params["target_expand"] = target_expand or {"left": 0.4, "top": 0.5, "right": 0.6, "bottom": 0.3}
     return {
@@ -292,7 +292,12 @@ def build_monitor_payload(
 
 def build_agent_llm_param(agent: dict, prompt: Optional[str] = None,
                           alarm_condition: Optional[str] = None) -> dict:
-    """由智能体算法项构造『小+大』任务 monitor 里的 agentLLMParam。"""
+    """由智能体算法项构造『小+大』任务 monitor 里的 agentLLMParam。
+
+    agent 可含 filter_enable / filter_keywords（仅描述型 freeform 有意义），语义与
+    build_agent_config 一致：关闭过滤时强制清空关键词，避免下发无意义的过滤词。
+    """
+    filter_enable = bool(agent.get("filter_enable", False))
     return {
         "event_id": agent.get("event_id"),
         "event_tag": agent.get("event_tag"),
@@ -300,6 +305,8 @@ def build_agent_llm_param(agent: dict, prompt: Optional[str] = None,
         "prompt": prompt if prompt is not None else agent.get("prompt", ""),
         "alarm_condition": alarm_condition or _default_alarm_condition(agent.get("alarm_type")),
         "filter": "",
+        "filter_enable": filter_enable,
+        "filter_keywords": (agent.get("filter_keywords") or "") if filter_enable else "",
     }
 
 
@@ -449,6 +456,8 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
         cfg["alarmInterval"] = ep.get("cooldownDuration")
     if ep.get("targetTypes"):
         cfg["yoloTarget"] = _target_type_to_yolo(ep.get("targetTypes"))
+        # 面板检测目标支持多选：原样带回设备的 targetTypes
+        cfg["yoloTargets"] = list(ep.get("targetTypes") or [])
     if "threshold" in ep:
         # payload 仅一个 threshold，按 targetTypes 落到对应的面板阈值字段（其余阈值无来源，保持默认）
         cfg[_thresh_key(ep.get("targetTypes"))] = ep.get("threshold")
@@ -507,6 +516,8 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
         item["alarmInterval"] = ep.get("cooldownDuration")
     if ep.get("targetTypes"):
         item["yoloTarget"] = _target_type_to_yolo(ep.get("targetTypes"))
+        # 面板检测目标支持多选：原样带回设备的 targetTypes（yoloTarget 为其首项推导出的主目标）
+        item["yoloTargets"] = list(ep.get("targetTypes") or [])
     if "threshold" in ep:
         # payload 仅一个 threshold，按 targetTypes 落到对应的面板阈值字段（其余阈值无来源，保持默认）
         item[_thresh_key(ep.get("targetTypes"))] = ep.get("threshold")
@@ -523,16 +534,23 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
         if "right" in expand:
             item["cropRight"] = expand.get("right")
 
-    # 『小+大』规则的二次大模型参数
+    # 『小+大』规则的二次大模型参数（面板第③步「级联后置多模态 Agent」展示的全量字段）
     if agent_llm.get("event_id"):
         item["agent_id"] = agent_llm.get("event_id")
+        # agentType 是面板下拉的选中值，其 option value 为 event_id，故必须回填 event_id 而非 event_tag
+        item["agentType"] = agent_llm.get("event_id")
     if agent_llm.get("event_tag"):
         item["event_tag"] = agent_llm.get("event_tag")
-        item["agentType"] = agent_llm.get("event_tag")
     if agent_llm.get("prompt"):
         item["prompt"] = agent_llm.get("prompt")
     if agent_llm.get("alarm_type"):
         item["alarm_type"] = agent_llm.get("alarm_type")
+    if agent_llm.get("alarm_condition"):
+        item["alarm_condition"] = agent_llm.get("alarm_condition")
+    if "filter_enable" in agent_llm:
+        item["filter_enable"] = bool(agent_llm.get("filter_enable"))
+    if agent_llm.get("filter_keywords"):
+        item["filter_keywords"] = agent_llm.get("filter_keywords")
 
     return item
 
