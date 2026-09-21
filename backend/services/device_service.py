@@ -644,6 +644,7 @@ class DeviceService:
                 task_id, channel_device_id, cabin, rules,
                 version=group[0].get("version", "V2.0.0"), seq=seq,
             )
+            print("下发 monitor payload:", monitor_payload)
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:
                 msg = (mon_res or {}).get("message") or "设备不可达或返回错误"

@@ -291,7 +291,6 @@ def build_warehouse_monitor(
             "alg_type": ["bypass"],
             "channel_id": 0,
             "channel_type": 1,
-            "stream_id": 0,
             "device_id": channel_device_id,
             "enable": enable,
             "monitor_id": monitor_id,
