@@ -262,7 +262,7 @@ async def _locate_device_task(client, device, db, task_id):
 
 
 def _locate_warehouse_monitor(param: list, algo_cabin_name: Optional[str]) -> Optional[dict]:
-    """在 monitor_list.param（每个算法仓一条 monitor、跨仓共享 monitor_id）中定位目标仓的 monitor。
+    """在 monitor_list.param（一个任务下每个算法仓一条 monitor、各自独立 monitor_id）中定位目标仓的 monitor。
 
     给了 algo_cabin_name 则精确匹配 labels.algoCabinName；否则取第一条（单仓任务的简化）。
     """
@@ -313,7 +313,7 @@ def _rule_from_existing(rule: dict, args: dict) -> dict:
         event_type=rule.get("eventType"),
         area=area,
         target_types=args.get("target_types") or ep.get("targetTypes"),
-        threshold=args.get("threshold", ep.get("threshold", 0.3)),
+        threshold=args.get("threshold", tb.rule_threshold(ep, rule.get("eventType"))),
         target_max=args.get("target_max", ep.get("targetMax", 1)),
         target_min=args.get("target_min", ep.get("targetMin", 0)),
         duration=args.get("duration", ep.get("duration", 3)),
@@ -476,7 +476,7 @@ TOOLS = [
         "name": "add_task_algorithm",
         "description": "向【已下发到设备的任务】新增一个算法（同一任务、同一类型可布控多个算法，支持增删改查）。"
                        "小模型/小+大任务：算法身份=算法仓 algo_cabin_name + 事件类型 event_type（二者必填，来自 list_device_algorithms）；"
-                       "若目标算法仓已在该任务中则往其追加一条规则，否则以相同 monitor_id 新建该算法仓的 monitor（跨仓算法共享 monitor_id）；"
+                       "若目标算法仓已在该任务中则往其追加一条规则，否则为该算法仓新建一条 monitor（同一任务可挂多条 monitor，monitor_id 各自独立）；"
                        "传了 agent_id 时该算法为『小+大』（挂二次大模型）。纯大模型任务(agent_real_task)：算法=智能体，用 agent_id 指定，"
                        "追加到任务的智能体列表（上限4个）。新增前建议先 list_device_algorithms 确认算法/仓名，再 get_device_control_tasks 确认任务。",
         "parameters": {
@@ -866,7 +866,8 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
 
     - 小模型/小+大任务(single_point_task)：算法 = (algo_cabin_name, event_type)。
       · 目标算法仓已在任务中 → 往该仓 rulesParams 追加一条规则（连同原有规则一起覆盖重下）；
-      · 目标算法仓不在任务中 → 用【相同 monitor_id】新建该仓 monitor（跨仓算法共享 monitor_id）。
+      · 目标算法仓不在任务中 → 为该仓新建一条 monitor，monitor_id 按 tb.next_monitor_id 顺延分配
+        （同一 task 下多条 monitor 的 id 必须互不相同）。
       给了 agent_id 时该算法为『小+大』，挂二次大模型。
     - 纯大模型任务(agent_real_task)：算法 = 智能体，用 agent_id 指定，追加到 agent_list 后 PUT（上限 4）。
     """
@@ -976,13 +977,8 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
             version = labels.get("version") or args.get("version", "V2.0.0")
             new_rules = list(rules) + [new_rule]
         else:
-            # 跨仓新增：与任务已有 monitor【共享同一 monitor_id】，新建该仓 monitor
-            monitor_id = None
-            for m in param:
-                mid = (m.get("common_param") or {}).get("monitor_id")
-                if mid is not None:
-                    monitor_id = mid
-                    break
+            # 跨仓新增：该仓需要【独立的 monitor_id】（与任务已有仓共用会互相覆盖），按规律顺延分配
+            monitor_id = tb.next_monitor_id(task_id, param)
             monitor_name = None
             version = args.get("version", "V2.0.0")
             new_rules = [new_rule]

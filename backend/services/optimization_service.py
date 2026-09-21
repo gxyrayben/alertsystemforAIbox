@@ -177,7 +177,7 @@ async def _optimize_monitor(client, device, db, task: dict, mon: dict,
 
     samples = _crop_samples(alerts)
     current = {
-        "threshold": ep.get("threshold", 0.3),
+        "threshold": task_builders.rule_threshold(ep, event_type),
         "target_max": ep.get("targetMax", 1),
         "target_min": ep.get("targetMin", 0),
     }

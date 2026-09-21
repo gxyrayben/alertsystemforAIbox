@@ -591,9 +591,11 @@ class DeviceService:
 
         流程：create_task(single_point_task，首算法 eventType 作锚点) → 取 task_id →
         按 algo_cabin_name 分组（保序）→ 每仓把该仓全部规则组装成一条 monitor 下发。
-        关键契约：所有仓【共享同一 monitor_id=int(task_id)】（build_warehouse_monitor 默认值），
-        与 add/update/remove_task_algorithm 的跨仓定位方式一致（靠 labels.algoCabinName 区分仓、
-        eventType 区分规则）；同仓 eventType 唯一由上层校验保证。
+        关键契约：一个 task 关联多条 monitor，各仓【monitor_id 互不相同】，按
+        task_builders.monitor_id_for 规律取 int(task_id)*100 + 仓序号(1..N)；
+        同仓多算法只调一次 monitor 接口（多条 rulesParams），跨仓则调多次。
+        add/update/remove_task_algorithm 定位时靠 labels.algoCabinName 认仓、eventType 认规则；
+        同仓 eventType 唯一由上层校验保证。
 
         每个 algorithm 入参（router 已预解析 I/O 相关字段）：event_type / algo_cabin_name / version /
         target_types / threshold / target_max / target_min / duration / cooldown /
@@ -620,9 +622,9 @@ class DeviceService:
         for algo in algorithms:
             groups.setdefault(algo.get("algo_cabin_name"), []).append(algo)
 
-        # 第二步：逐仓组装 rulesParams → 下发一条 monitor（各仓共享默认 monitor_id=int(task_id)）
+        # 第二步：逐仓组装 rulesParams → 下发一条 monitor（仓序号 seq 决定各自的 monitor_id）
         failed: List[str] = []
-        for cabin, group in groups.items():
+        for seq, (cabin, group) in enumerate(groups.items(), start=1):
             rules = [
                 task_builders.build_rule(
                     event_type=algo.get("event_type"),
@@ -640,7 +642,7 @@ class DeviceService:
             ]
             monitor_payload = task_builders.build_warehouse_monitor(
                 task_id, channel_device_id, cabin, rules,
-                version=group[0].get("version", "V2.0.0"), monitor_name=task_name,
+                version=group[0].get("version", "V2.0.0"), seq=seq,
             )
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:
@@ -751,7 +753,7 @@ class DeviceService:
 
         设备既无 monitor 更新接口也无删除接口，因此：
         - 保留的仓：用【该仓原 monitor_id】+ 同 algoCabinName 覆盖下发新 rulesParams（整仓替换）；
-        - 新增的仓：monitor_id 取默认 int(task_id)，与创建路径同一契约；
+        - 新增的仓：按 task_builders.next_monitor_id 顺延分配【独立 monitor_id】（与既有仓共用会互相覆盖）；
         - 编辑中被移除的仓：原规则原样重下但 enable=False（停用降级，与 _disable_whole_task 一致）。
         enable 沿用设备现值（启用/停用走 set_task_enable）。返回 (成功?, 中文消息)。
         """
@@ -791,10 +793,12 @@ class DeviceService:
                 "rules": task_builders._warehouse_rules(mon),
             }
 
-        # ③ 按仓分组覆盖下发（保留仓沿用原 monitor_id，新增仓用默认值 int(task_id)）
+        # ③ 按仓分组覆盖下发（保留仓沿用原 monitor_id，新增仓按规律顺延分配独立 monitor_id）
         groups: dict = {}
         for algo in algorithms:
             groups.setdefault(algo.get("algo_cabin_name"), []).append(algo)
+        # 已占用的 monitor（含本轮新分配的），供 next_monitor_id 避让，避免多个新增仓撞同一个 id
+        allocated = list(existing)
         failed: List[str] = []
         for cabin, group in groups.items():
             rules = [
@@ -813,11 +817,15 @@ class DeviceService:
                 for algo in group
             ]
             old = index.get(cabin) or {}
+            monitor_id = old.get("monitor_id")
+            if monitor_id is None:
+                monitor_id = task_builders.next_monitor_id(task_id, allocated)
+                allocated.append({"common_param": {"monitor_id": monitor_id}})
             monitor_payload = task_builders.build_warehouse_monitor(
                 task_id, int(channel), cabin, rules,
                 version=group[0].get("version", "V2.0.0"),
-                monitor_id=old.get("monitor_id"),
-                monitor_name=old.get("monitor_name") or task_name or task.get("task_name"),
+                monitor_id=monitor_id,
+                monitor_name=old.get("monitor_name"),
             )
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:

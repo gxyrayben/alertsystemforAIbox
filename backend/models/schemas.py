@@ -115,8 +115,9 @@ class WarehouseAlgorithmItem(BaseModel):
 class WarehouseTaskDeploy(BaseModel):
     """算法仓任务【多算法】统一下发请求体（纯小模型 / 小+大 / 二者混合，一次提交多条算法）。
 
-    一个任务可挂多条算法：同一 algo_cabin_name 组成一条 monitor 的多条 rulesParams，
-    跨 algo_cabin_name 则是共享同一 monitor_id 的多条 monitor（详见 device_service.deploy_warehouse_task_multi）。
+    一个任务可挂多条算法：同一 algo_cabin_name 组成一条 monitor 的多条 rulesParams（只调一次 monitor 接口），
+    跨 algo_cabin_name 则是多条【monitor_id 各自独立】的 monitor（逐仓调用，monitor_id=task_id*100+仓序号，
+    详见 device_service.deploy_warehouse_task_multi 与 task_builders.monitor_id_for）。
     小模型/小+大为【实时分析】，无分析间隔/抽帧间隔概念。
     """
     channel_device_id: int

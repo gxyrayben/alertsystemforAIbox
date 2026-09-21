@@ -167,7 +167,9 @@ def build_rule(
     一个算法的唯一身份 = (算法仓 algoCabinName, eventType)：同一算法仓内可挂多条规则，
     每条对应一个 eventType；build_warehouse_monitor 会把多条规则组装进同一条 monitor。
     agent_llm 非空时该规则为『小+大』：挂 aiotapCustom.agentLLMParam、切 full_analysis、
-    带扩图 target_expand（缺省对称默认值）。ruleId 由 build_warehouse_monitor 统一重排为 1..N。
+    带扩图 target_expand（缺省对称默认值）。ruleId 由 build_warehouse_monitor 统一重排为 1..N，
+    ruleCustomName 同样由其统一赋为 str(monitor_id)（本函数只产出与 monitor 无关的字段）。
+    threshold 入参为【标量】，下发时按设备格式包成 {eventType: 值}（传字典则原样透传）。
     """
     area = area or full_frame_area()
     target_types = target_types or ["PERSON"]
@@ -176,20 +178,79 @@ def build_rule(
         "targetMin": target_min,
         "duration": duration,
         "cooldownDuration": cooldown,
-        "threshold": threshold,
+        # 设备侧 threshold 是按事件类型分别配置的字典（一条规则一个 eventType，故只有一项）
+        "threshold": threshold if isinstance(threshold, dict) else {event_type: threshold},
         "targetTypes": target_types,
         "level": "ALARM_LEVEL",
     }
     if agent_llm:
-        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm} ### 这里不对 gxyrayben 
+        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm} ### 这里不对 gxyrayben
         extend_params["analysis_mode"] = "full_analysis"
         extend_params["target_expand"] = target_expand or {"left": 0.4, "top": 0.5, "right": 0.6, "bottom": 0.3}
     return {
         "areas": [area],
+        "masks": [],
+        "labels": {},
         "eventType": event_type,
         "ruleId": rule_id,
         "extendParams": extend_params,
     }
+
+
+def rule_threshold(extend_params: Optional[dict], event_type: Optional[str] = None,
+                   default: float = 0.3):
+    """从规则 extendParams 读出【标量】阈值（build_rule 的 threshold 逆映射）。
+
+    设备侧 threshold 形如 {"FALL": 0.97}：优先取与 event_type 同名的项，取不到则取首项；
+    历史/异常数据里若仍是标量则原样返回。全部取不到时回落 default。
+    """
+    th = (extend_params or {}).get("threshold")
+    if isinstance(th, dict):
+        if event_type is not None and event_type in th:
+            return th.get(event_type)
+        for value in th.values():
+            return value
+        return default
+    return default if th is None else th
+
+
+def monitor_id_for(task_id, seq: int = 1) -> int:
+    """monitor_id 分配规则：task_id * 100 + 任务内序号(1..N)。
+
+    一个任务可关联多条 monitor（每个算法仓一条），各 monitor 的 monitor_id 必须【互不相同】，
+    否则设备侧会互相覆盖；由所属 task_id 派生以保证单 BOX 内唯一：task_id=8 → 801 / 802。
+    task_id 非数字时退化为序号本身（不阻断下发）。
+    """
+    try:
+        base = int(task_id) * 100
+    except (TypeError, ValueError):
+        base = 0
+    try:
+        seq = int(seq)
+    except (TypeError, ValueError):
+        seq = 1
+    return base + max(seq, 1)
+
+
+def next_monitor_id(task_id, monitors: Optional[List[dict]]) -> int:
+    """在任务【已有 monitor 列表】之外分配下一个可用 monitor_id（按 monitor_id_for 规律取最小空位）。
+
+    供『编辑时新增算法仓』与『向已下发任务跨仓新增算法』复用：新仓必须拿独立 monitor_id。
+    monitors 为设备 monitor_list 返回的原始项列表（读 common_param.monitor_id）。
+    """
+    used = set()
+    for mon in monitors or []:
+        if not isinstance(mon, dict):
+            continue
+        mid = (mon.get("common_param") or {}).get("monitor_id")
+        try:
+            used.add(int(mid))
+        except (TypeError, ValueError):
+            continue
+    seq = 1
+    while monitor_id_for(task_id, seq) in used:
+        seq += 1
+    return monitor_id_for(task_id, seq)
 
 
 def build_warehouse_monitor(
@@ -201,38 +262,43 @@ def build_warehouse_monitor(
     monitor_id: Optional[int] = None,
     monitor_name: Optional[str] = None,
     enable: bool = True,
+    seq: int = 1,
 ) -> dict:
     """把【同一算法仓】的多条规则(rulesParams)组装成一条 monitor。
 
     设备存储模型：一个算法仓 = 一条 monitor，可挂多条 rulesParams（各对应一个 eventType）；
-    跨算法仓时则是【共享同一 monitor_id】的多条 monitor（靠 labels.algoCabinName 区分）。
-    create_monitor 以 (monitor_id + algoCabinName) 为键覆盖该仓 monitor 的整份 rulesParams，
-    故增/改/删单个算法都要把该仓【全部保留的规则】一次性传入。rules 内 ruleId 重排为 1..N。
+    一个 task 跨算法仓时则是【多条各自独立 monitor_id】的 monitor（同 task_id，靠 monitor_id 区分，
+    labels.algoCabinName 标明所属仓）——即同仓多算法只调一次 monitor 接口，跨仓则调多次。
+    create_monitor 以 monitor_id 为键覆盖该仓 monitor 的整份 rulesParams，
+    故增/改/删单个算法都要把该仓【全部保留的规则】一次性传入。rules 内 ruleId 重排为 1..N，
+    ruleCustomName 统一为 str(monitor_id)（与 warehouse_v20_param.id/name、monitor_name 一致）。
     enable=False 用于『停用』降级（无硬删除接口时，清空算法/清除任务以覆盖方式停用而非删除）。
-    monitor_id 缺省由 task_id 派生（单 BOX 内简化的唯一 id 方案）。
+    monitor_id 缺省由 (task_id, seq) 按 monitor_id_for 规律派生；覆盖重下已有 monitor 时
+    必须显式传入设备上读回的原 monitor_id。
     """
     if monitor_id is None:
-        try:
-            monitor_id = int(task_id)
-        except (TypeError, ValueError):
-            monitor_id = 1
+        monitor_id = monitor_id_for(task_id, seq)
+    monitor_name = monitor_name or str(monitor_id)
     norm_rules = []
     for idx, rule in enumerate(rules or [], start=1):
         r = dict(rule)
         r["ruleId"] = idx
+        r["ruleCustomName"] = str(monitor_id)
         norm_rules.append(r)
-    first_event = (norm_rules[0].get("eventType") if norm_rules else None) or "warehouse"
     return {
         "common_param": {
             "task_id": task_id,
             "alg_type": ["bypass"],
             "channel_id": 0,
             "channel_type": 1,
+            "stream_id": 0,
             "device_id": channel_device_id,
             "enable": enable,
             "monitor_id": monitor_id,
-            "monitor_name": monitor_name or f"monitor_{first_event}",
+            "monitor_name": monitor_name,
             "warehouse_v20_param": {
+                "id": str(monitor_id),
+                "name": str(monitor_id),
                 "labels": {"algoCabinName": algo_cabin_name, "version": version},
                 "rulesParams": norm_rules,
             },
@@ -258,13 +324,14 @@ def build_monitor_payload(
     cooldown: int = 600,
     agent_llm: Optional[dict] = None,
     target_expand: Optional[dict] = None,
+    seq: int = 1,
 ) -> dict:
     """算法仓任务第二步 monitor（【单算法】便捷入口，委托到 build_rule + build_warehouse_monitor）。
 
     agent_llm 非空时挂载 aiotapCustom.agentLLMParam 并切换 analysis_mode=full_analysis，
     即『小+大』任务；为空则是『纯小模型』任务。
     target_expand 为『小+大』任务的扩图策略（缺省对称默认值），仅在 agent_llm 非空分支内生效。
-    monitor_id 缺省由 task_id 派生（单 BOX 内简化的唯一 id 方案）。
+    monitor_id 缺省由 (task_id, seq) 派生（单算法即单仓，故 seq 默认 1 → task_id*100+1）。
     需要在同一算法仓挂多条算法、或跨仓增删改时，请直接用 build_rule + build_warehouse_monitor。
     """
     rule = build_rule(
@@ -287,6 +354,7 @@ def build_monitor_payload(
         version=version,
         monitor_id=monitor_id,
         monitor_name=monitor_name,
+        seq=seq,
     )
 
 
@@ -459,8 +527,8 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
         # 面板检测目标支持多选：原样带回设备的 targetTypes
         cfg["yoloTargets"] = list(ep.get("targetTypes") or [])
     if "threshold" in ep:
-        # payload 仅一个 threshold，按 targetTypes 落到对应的面板阈值字段（其余阈值无来源，保持默认）
-        cfg[_thresh_key(ep.get("targetTypes"))] = ep.get("threshold")
+        # 设备侧 threshold 为 {eventType: 值} 字典，按 targetTypes 落到对应的面板阈值字段
+        cfg[_thresh_key(ep.get("targetTypes"))] = rule_threshold(ep, rule.get("eventType"))
 
     # 扩图区域仅『小+大』任务的 monitor 才有 target_expand
     expand = ep.get("target_expand") or {}
@@ -519,8 +587,8 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
         # 面板检测目标支持多选：原样带回设备的 targetTypes（yoloTarget 为其首项推导出的主目标）
         item["yoloTargets"] = list(ep.get("targetTypes") or [])
     if "threshold" in ep:
-        # payload 仅一个 threshold，按 targetTypes 落到对应的面板阈值字段（其余阈值无来源，保持默认）
-        item[_thresh_key(ep.get("targetTypes"))] = ep.get("threshold")
+        # 设备侧 threshold 为 {eventType: 值} 字典，按 targetTypes 落到对应的面板阈值字段
+        item[_thresh_key(ep.get("targetTypes"))] = rule_threshold(ep, rule.get("eventType"))
 
     # 扩图区域仅『小+大』规则才有 target_expand
     expand = ep.get("target_expand") or {}
