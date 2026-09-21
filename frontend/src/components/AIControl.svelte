@@ -40,7 +40,7 @@
         yoloHumanThresh: 0.31, yoloVehicleThresh: 0.32, yoloNonMotorThresh: 0.37,
         intrusionDuration: 3, alarmInterval: 10,
         cropUp: 0.5, cropDown: 0.3, cropLeft: 0.4, cropRight: 0.6,
-        // 目标大小（设备 targetMax/targetMin）：最小 0~100、最大 50~100
+        // 目标大小（面板 0~100 百分比，下发时折算成设备 targetMax/targetMin 的 0~1）：最小 0~100、最大 50~100
         maxTarget: 100, minTarget: 0, roiPoints: [],
         event_type: '', algo_cabin_name: '',    // 算法标识（propose/对话填充；查看态无来源，靠 deploy() guard 拦截）
         // 智能体任务（agent_real_task）专用：
@@ -52,7 +52,7 @@
         // 算法仓（小模型/小+大）任务：多算法项，每项自带参数 + 绑池 ROI（roiId），与 agents[] 镜像。
         // Phase 1：由 propose/模板/查看归一化为【单项】；Phase 2 再加多槽编辑器。
         algorithms: [],           // {kind,event_type,algo_cabin_name,version,useFullFrame,roiId, 各参数…}
-        rois: [{ id: 'full', name: '全屏检测', points: [] }],   // 任务级 ROI 池（两种模式共享）
+        rois: [{ id: 'full', name: '全屏检测', points: [], areaId: 1, areaType: 'POLYGON' }],   // 任务级 ROI 池（两种模式共享）
         activeAgentIndex: 0,
         activeAlgorithmIndex: 0
     };
@@ -93,6 +93,49 @@
     // convId 变化时持久化，刷新后可恢复到同一会话
     $: if (convId) localStorage.setItem(LS_CONV_KEY, convId);
 
+    // ── ROI 池的设备侧标识（areaId / areaName / areaType）────────────────────
+    // 设备 areas[i] 需要 areaId(区域号) / areaName(区域名) / areaType(几何类型)：
+    // areaName 即池项 name（表格里可编辑），areaType 当前画布只产出多边形(POLYGON)，
+    // areaId 由池统一分配且【同一任务内唯一】（同一块 ROI 被多个算法/智能体共用时共享同一号）。
+    const AREA_TYPE_POLYGON = 'POLYGON';
+    function fullRoiItem() {
+        return { id: 'full', name: '全屏检测', points: [], areaId: 1, areaType: AREA_TYPE_POLYGON };
+    }
+    // 几何类型的中文显示名（当前画布只产出 POLYGON；未知类型原样展示，便于看出设备带回了什么）
+    function areaTypeLabel(t) {
+        return (t || AREA_TYPE_POLYGON) === AREA_TYPE_POLYGON ? '多边形' : t;
+    }
+    // 取池内最小空闲区域号（含默认「全屏检测」占用的号），用于新建检测区
+    function nextAreaId(rois) {
+        const used = new Set((rois || []).map((r) => Number(r.areaId)).filter((n) => Number.isInteger(n) && n > 0));
+        let id = 1;
+        while (used.has(id)) id += 1;
+        return id;
+    }
+    // 池内是否存在缺号/非法号/撞号/缺几何类型的项（不变式的触发条件）
+    function needsAreaMeta(rois) {
+        const seen = new Set();
+        for (const r of rois || []) {
+            const aid = Number(r.areaId);
+            if (!Number.isInteger(aid) || aid < 1 || seen.has(aid) || !r.areaType) return true;
+            seen.add(aid);
+        }
+        return false;
+    }
+    // 按「已有号优先、缺号/撞号顺延到最小空闲号」补齐池项的 areaId/areaType
+    function withAreaMeta(rois) {
+        const used = new Set();
+        return (rois || []).map((r) => {
+            let aid = Number(r.areaId);
+            if (!Number.isInteger(aid) || aid < 1 || used.has(aid)) {
+                aid = 1;
+                while (used.has(aid)) aid += 1;
+            }
+            used.add(aid);
+            return { ...r, areaId: aid, areaType: r.areaType || AREA_TYPE_POLYGON };
+        });
+    }
+
     // ── 派生态：智能体任务 & 算法仓任务共享「池 + 逐项 ROI 绑定」模型 ────────
     $: isAgentTask = config.taskMode === 'agent';
     $: activeAgent = (config.agents || [])[config.activeAgentIndex] || null;
@@ -104,8 +147,11 @@
     $: if (drawingRoiId && config.rois && !config.rois.some((r) => r.id === drawingRoiId)) drawingRoiId = null;
     // 不变式：ROI 池恒有默认「全屏检测」伪项（任何来源回填后补齐），它是对应关系表的默认关联行
     $: if (config.rois && !config.rois.some((r) => r.id === 'full')) {
-        config.rois = [{ id: 'full', name: '全屏检测', points: [] }, ...config.rois];
+        config.rois = [fullRoiItem(), ...config.rois];
     }
+    // 不变式：每个池项都带设备侧下发所需的 areaId(任务内唯一，≥1 整数) 与 areaType(几何类型)。
+    // 对话/模板/旧快照回填的池项可能缺号或撞号，这里统一补齐；仅在确有缺失/冲突时改写，避免反复触发响应式。
+    $: if (config.rois && needsAreaMeta(config.rois)) config.rois = withAreaMeta(config.rois);
 
     // Step1「关联通道」下拉项：解析 $selectedDevice.channels（镜像 Alerts.svelte parseChannelsNames：按 device_id 去重 + display_name）
     $: channelOptions = (() => {
@@ -190,6 +236,13 @@
     function setThresh(v) {
         const num = Math.min(0.9, Math.max(0.1, Number(v) || 0.1));
         config = { ...config, [threshKey]: +num.toFixed(2) };
+    }
+
+    // 目标大小：面板口径 0~100(目标框占画面百分比) → 设备 targetMax/targetMin 口径 0~1，保留两位小数
+    function toTargetSize(v, dft) {
+        const n = Number(v);
+        const pct = Number.isFinite(n) ? n : dft;
+        return +Math.min(1, Math.max(0, pct / 100)).toFixed(2);
     }
 
     const presets = [
@@ -312,7 +365,9 @@
         if (!roiId || roiId === 'full' || !(config.rois || []).some((r) => r.id === roiId)) {
             const n = (config.rois || []).filter((r) => r.id !== 'full').length + 1;
             roiId = 'roi_' + Date.now();
-            config.rois = [...(config.rois || []), { id: roiId, name: `检测区${n}`, points: [] }];
+            // 新检测区即时拿到任务内唯一的 areaId 与几何类型，随后随算法一起下发给设备
+            config.rois = [...(config.rois || []),
+                { id: roiId, name: `检测区${n}`, points: [], areaId: nextAreaId(config.rois), areaType: AREA_TYPE_POLYGON }];
             drawingRoiId = roiId;
         }
         config.rois = config.rois.map((r) => r.id === roiId ? { ...r, points: [...r.points, pt] } : r);
@@ -537,10 +592,25 @@
         config.algorithms = config.algorithms.map((a, idx) => idx === i ? { ...a, [key]: value } : a);
     }
 
-    // ── ROI 池：改名 / 删除（删除后引用它的算法/智能体回落全屏；全屏项为默认不可删/改） ──
+    // ── ROI 池：改名 / 改区域号 / 删除（删除后引用它的算法/智能体回落全屏；全屏项为默认不可删/改） ──
     function renameRoi(id, name) {
         if (id === 'full') return;
         config.rois = config.rois.map((r) => r.id === id ? { ...r, name } : r);
+    }
+    // 改设备侧区域号(areaId)：必须为 ≥1 的整数且【任务内唯一】（含默认全屏项占用的号），撞号则拒绝。
+    // 返回 false 表示未写回，调用方据此把输入框还原为原值。
+    function setAreaId(id, value) {
+        const aid = Number(value);
+        if (!Number.isInteger(aid) || aid < 1) {
+            showToast('区域号(areaId)需为大于 0 的整数。', 'warning');
+            return false;
+        }
+        if ((config.rois || []).some((r) => r.id !== id && Number(r.areaId) === aid)) {
+            showToast(`区域号 ${aid} 已被其它检测区占用：同一任务内 areaId 必须唯一。`, 'warning');
+            return false;
+        }
+        config.rois = config.rois.map((r) => r.id === id ? { ...r, areaId: aid } : r);
+        return true;
     }
     function deleteRoi(id) {
         if (id === 'full') { showToast('全屏检测为默认项，不可删除。', 'info'); return; }
@@ -575,7 +645,7 @@
     $: customRois = (config.rois || []).filter((r) => r.id !== 'full');
     // 对应关系表的完整行集：默认「全屏检测」置顶，其后是用户画出的自定义检测区
     $: tableRois = [
-        (config.rois || []).find((r) => r.id === 'full') || { id: 'full', name: '全屏检测', points: [] },
+        (config.rois || []).find((r) => r.id === 'full') || fullRoiItem(),
         ...customRois
     ];
     // 画布叠加层：勾了「显示」、且不是当前正在绘制的那个区域（当前区由主多边形单独高亮）
@@ -685,7 +755,7 @@
     function normalizeWarehouseConfig(base, d) {
         // 池里必须始终有默认「全屏检测」伪项（第②步对应关系表的默认关联行）
         const withFull = (list) => ((list || []).some((r) => r.id === 'full')
-            ? list : [{ id: 'full', name: '全屏检测', points: [] }, ...(list || [])]);
+            ? list : [fullRoiItem(), ...(list || [])]);
         // useFullFrame 与 roiId==='full' 恒等：老快照可能两者不一致，统一以 roiId 为准
         const normItem = (it) => ({ ...it, roiId: it.roiId || 'full', useFullFrame: (it.roiId || 'full') === 'full' });
         if (Array.isArray(d.algorithms) && d.algorithms.length) {
@@ -704,7 +774,7 @@
         }
         // 旧单算法：由 event_type/algo_cabin_name/roiPoints(顶层) 组装一条 algorithms[] + 一个池 ROI
         const pts = d.roiPoints || base.roiPoints || [];
-        const rois = [{ id: 'full', name: '全屏检测', points: [] }];
+        const rois = [fullRoiItem()];
         let roiId = 'full';
         if (pts.length >= 3) { roiId = 'roi_1'; rois.push({ id: roiId, name: '检测区1', points: pts }); }
         const kind = (d.taskMode === 'combined') ? 'combined' : 'small';
@@ -740,7 +810,7 @@
             config = {
                 ...config, ...proposal,
                 agents: proposal.agents && proposal.agents.length ? proposal.agents : config.agents,
-                rois: proposal.rois && proposal.rois.length ? proposal.rois : [{ id: 'full', name: '全屏检测', points: [] }],
+                rois: proposal.rois && proposal.rois.length ? proposal.rois : [fullRoiItem()],
                 activeAgentIndex: proposal.activeAgentIndex || 0
             };
             availableAgents = proposal.available_agents || [];
@@ -770,7 +840,7 @@
             config = {
                 ...defaultConfig, ...d,
                 agents: d.agents && d.agents.length ? d.agents : [],
-                rois: d.rois && d.rois.length ? d.rois : [{ id: 'full', name: '全屏检测', points: [] }],
+                rois: d.rois && d.rois.length ? d.rois : [fullRoiItem()],
                 activeAgentIndex: 0
             };
             await loadAvailableAgents();  // 拉可选智能体，便于下拉换绑
@@ -836,7 +906,7 @@
 
     // 新建布控任务：清空面板（task_id=null ⇒ 保存走新建下发），默认小模型任务 + 首个通道
     async function startNewTask() {
-        config = { ...defaultConfig, agents: [], algorithms: [], rois: [{ id: 'full', name: '全屏检测', points: [] }] };
+        config = { ...defaultConfig, agents: [], algorithms: [], rois: [fullRoiItem()] };
         const ch = channelOptions[0];
         if (ch) config.channel_device_id = ch.device_id;
         templateApplied = false;
@@ -983,7 +1053,10 @@
             // 检测目标支持多选：下发 item/面板的 yoloTargets；老配置只有单值 yoloTarget 时按它推导
             const picked = (Array.isArray(p.yoloTargets) && p.yoloTargets.length) ? p.yoloTargets : null;
             const target_types = picked || (yoloTarget === 'vehicle' ? ['VEHICLE'] : yoloTarget === 'human' ? ['PERSON'] : ['NON_MOTOR']);
-            const roiPoints = ((item.roiId || 'full') === 'full') ? [] : ((config.rois.find((r) => r.id === item.roiId)?.points) || []);
+            // 检测区：绑「全屏检测」→ 空点(设备侧回落全画面)，否则取池项点集；
+            // areaId/areaName/areaType 随之一起下发（用户在第②步配置，areaId 任务内唯一）
+            const roi = (config.rois || []).find((r) => r.id === (item.roiId || 'full')) || fullRoiItem();
+            const roiPoints = ((item.roiId || 'full') === 'full') ? [] : (roi.points || []);
             const kind = item.kind || 'small';
             const algo = {
                 kind,
@@ -992,12 +1065,15 @@
                 version: item.version || config.version || 'V2.0.0',
                 target_types,
                 threshold: Number(activeThresh),
-                // 目标大小（设备 targetMax/targetMin）：最小 0~100、最大 50~100，取整下发。
-                target_max: Math.max(0, Math.round(Number(p.maxTarget) || 0)),
-                target_min: Math.max(0, Math.round(Number(p.minTarget) || 0)),
+                // 目标大小：面板 0~100(画面占比百分比) → 设备 targetMax/targetMin 的 0~1，保留两位小数
+                target_max: toTargetSize(p.maxTarget, 100),
+                target_min: toTargetSize(p.minTarget, 0),
                 duration: Math.round(Number(p.intrusionDuration)),
                 cooldown: Math.round(Number(p.alarmInterval)),
-                roiPoints
+                roiPoints,
+                areaId: Number(roi.areaId) || 1,
+                areaName: roi.name || '检测区',
+                areaType: roi.areaType || AREA_TYPE_POLYGON
             };
             if (kind === 'combined') {
                 // 小+大：追加扩图策略（target_expand 仅小+大生效）+ 二次大模型全量参数
@@ -1067,16 +1143,23 @@
             channel_device_id: Number(channelId),
             task_name: config.name,
             analysis_interval: Number(config.interval) || 5,
-            agents: config.agents.map((a) => ({
-                event_id: a.event_id,
-                event_tag: a.event_tag || '',
-                alarm_type: a.alarm_type || 'freeform',
-                prompt: a.prompt || '',
-                alarm_condition: a.alarm_condition || null,
-                filter_enable: a.alarm_type === 'freeform' ? !!a.filter_enable : false,
-                filter_keywords: a.alarm_type === 'freeform' ? (a.filter_keywords || '') : '',
-                roiPoints: (config.rois.find((r) => r.id === a.roiId)?.points) || []
-            }))
+            agents: config.agents.map((a) => {
+                // 同 deployWarehouseTaskMulti：逐智能体解析所绑检测区，连同设备侧区域标识一起下发
+                const roi = (config.rois || []).find((r) => r.id === (a.roiId || 'full')) || fullRoiItem();
+                return {
+                    event_id: a.event_id,
+                    event_tag: a.event_tag || '',
+                    alarm_type: a.alarm_type || 'freeform',
+                    prompt: a.prompt || '',
+                    alarm_condition: a.alarm_condition || null,
+                    filter_enable: a.alarm_type === 'freeform' ? !!a.filter_enable : false,
+                    filter_keywords: a.alarm_type === 'freeform' ? (a.filter_keywords || '') : '',
+                    roiPoints: ((a.roiId || 'full') === 'full') ? [] : (roi.points || []),
+                    areaId: Number(roi.areaId) || 1,
+                    areaName: roi.name || '检测区',
+                    areaType: roi.areaType || AREA_TYPE_POLYGON
+                };
+            })
         };
         const editing = !!config.task_id;
         try {
@@ -1145,7 +1228,7 @@
             config = {
                 ...defaultConfig, ...d,
                 agents: d.agents && d.agents.length ? d.agents : [],
-                rois: d.rois && d.rois.length ? d.rois : [{ id: 'full', name: '全屏检测', points: [] }],
+                rois: d.rois && d.rois.length ? d.rois : [fullRoiItem()],
                 activeAgentIndex: 0
             };
             await loadAvailableAgents();
@@ -1797,8 +1880,9 @@
                                 <thead>
                                     <tr class="bg-slate-900/60 text-[10px] text-slate-400">
                                         <th class="px-3 py-2 font-medium w-12">显示</th>
-                                        <th class="px-3 py-2 font-medium">ROI 区域名称 (支持编辑)</th>
-                                        <th class="px-3 py-2 font-medium w-24">几何类型</th>
+                                        <th class="px-3 py-2 font-medium w-24">区域号 areaId</th>
+                                        <th class="px-3 py-2 font-medium">ROI 区域名称 areaName (支持编辑)</th>
+                                        <th class="px-3 py-2 font-medium w-24">几何类型 areaType</th>
                                         <th class="px-3 py-2 font-medium">关联绑定的算法 / 智能体 (源自第一步勾选)</th>
                                         <th class="px-3 py-2 font-medium w-28 text-right">操作</th>
                                     </tr>
@@ -1818,6 +1902,16 @@
                                             </td>
                                             <td class="px-3 py-3 align-middle">
                                                 {#if isFull}
+                                                    <span class="text-[11px] font-mono text-slate-400" title="全屏检测的设备侧区域号（默认项，不可改）">{roi.areaId}</span>
+                                                {:else}
+                                                    <input type="number" min="1" step="1" value={roi.areaId}
+                                                           on:change={(e) => { if (!setAreaId(roi.id, e.target.value)) e.target.value = roi.areaId; }}
+                                                           title="下发给设备的区域号 areaId：同一任务内必须唯一"
+                                                           class="w-16 bg-slate-950 border border-slate-700 text-slate-100 rounded px-2 py-1.5 text-[11px] font-mono focus:border-indigo-500 focus:outline-none" />
+                                                {/if}
+                                            </td>
+                                            <td class="px-3 py-3 align-middle">
+                                                {#if isFull}
                                                     <span class="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-200">
                                                         {roi.name}
                                                         <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[9px] font-medium text-slate-500">默认</span>
@@ -1829,9 +1923,9 @@
                                             </td>
                                             <td class="px-3 py-3 align-middle">
                                                 {#if isFull}
-                                                    <span class="text-[11px] text-slate-400">全画面</span>
+                                                    <span class="text-[11px] text-slate-400" title="全画面四角多边形 POLYGON">全画面</span>
                                                 {:else}
-                                                    <span class="text-[11px] text-slate-400">多边形</span>
+                                                    <span class="text-[11px] text-slate-400" title="下发的 areaType={roi.areaType}">{areaTypeLabel(roi.areaType)}</span>
                                                     <span class="text-[9px] font-mono ml-1 {(roi.points || []).length >= 3 ? 'text-slate-600' : 'text-amber-500'}">{(roi.points || []).length}点</span>
                                                 {/if}
                                             </td>
@@ -1974,7 +2068,7 @@
                                     <input type="number" min="0" step="1" bind:value={config.alarmInterval} class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
                                 </div>
                             </div>
-                            <!-- 目标大小（设备 targetMin/targetMax）：最小 0~100、最大 50~100 -->
+                            <!-- 目标大小：面板填 0~100 百分比，下发折算成设备 targetMin/targetMax 的 0~1；最小 0~100、最大 50~100 -->
                             <div class="grid grid-cols-2 gap-3">
                                 <div>
                                     <label class="block text-[10px] text-slate-400 mb-1">最小目标大小 (0-100)</label>

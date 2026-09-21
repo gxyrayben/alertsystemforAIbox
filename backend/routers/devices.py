@@ -151,7 +151,9 @@ def _enrich_agent_items(index: dict, items) -> List[dict]:
     """智能体任务逐项富化（创建/编辑共用）。
 
     缺省 prompt/alarm_type 用设备端该智能体自身配置兜底；非描述型强制关闭关键词过滤；
-    空 ROI 用全画面。设备上不存在该智能体时报 400。
+    空 ROI 用全画面。检测区的 areaId/areaName/areaType 取面板 ROI 池的用户配置，
+    最后按任务整体去重 areaId（同一块 ROI 共享一个号，不同 ROI 撞号则顺延）。
+    设备上不存在该智能体时报 400。
     """
     enriched = []
     for item in items:
@@ -170,8 +172,10 @@ def _enrich_agent_items(index: dict, items) -> List[dict]:
             "alarm_condition": item.alarm_condition,
             "filter_enable": bool(item.filter_enable) if is_attr else False,
             "filter_keywords": item.filter_keywords if is_attr else "",
-            "area": tb.roi_area(item.roiPoints),
+            "area": tb.roi_area(item.roiPoints, item.areaId or 1,
+                                item.areaName or "检测区", item.areaType or "POLYGON"),
         })
+    tb.dedupe_area_ids([e["area"] for e in enriched])
     return enriched
 
 
@@ -180,6 +184,8 @@ async def _enrich_warehouse_algorithms(
 ) -> List[dict]:
     """算法仓多算法逐项富化（创建/编辑共用）：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm。
 
+    检测区的 areaId/areaName/areaType 取面板 ROI 池的用户配置，最后按任务整体去重 areaId
+    （多条算法共用同一块 ROI 时共享同一号，不同 ROI 撞号则顺延，避免设备侧区域互相覆盖）。
     仅当存在『小+大』算法时才拉设备智能体列表（纯小模型无需触网）；智能体不存在报 400。
     combined 的关键词过滤沿用 _enrich_agent_items 语义：仅描述型(freeform)生效，其余强制关闭。
     """
@@ -215,7 +221,8 @@ async def _enrich_warehouse_algorithms(
             "event_type": item.event_type,
             "algo_cabin_name": item.algo_cabin_name,
             "version": item.version,
-            "area": tb.roi_area(item.roiPoints),
+            "area": tb.roi_area(item.roiPoints, item.areaId or 1,
+                                item.areaName or "检测区", item.areaType or "POLYGON"),
             "target_types": item.target_types,
             "threshold": item.threshold,
             "target_max": item.target_max,
@@ -225,6 +232,7 @@ async def _enrich_warehouse_algorithms(
             "agent_llm": agent_llm,
             "target_expand": target_expand,
         })
+    tb.dedupe_area_ids([e["area"] for e in enriched])
     return enriched
 
 
@@ -266,7 +274,8 @@ async def deploy_smallmodel_task(device_id: str, payload: SmallModelTaskDeploy, 
     deploy_warehouse_task 两步下发；成功后 best-effort 重刷快照使查看回填即时一致。
     """
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
-    area = tb.roi_area(payload.roiPoints)
+    area = tb.roi_area(payload.roiPoints, payload.areaId or 1,
+                       payload.areaName or "检测区", payload.areaType or "POLYGON")
     async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
         ok, msg, task_id = await DeviceService.deploy_warehouse_task(
             client, device_obj, db,
@@ -299,7 +308,8 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
     再经共享 deploy_warehouse_task 两步下发（monitor 挂载 agent_llm + 扩图策略 target_expand）。
     """
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
-    area = tb.roi_area(payload.roiPoints)
+    area = tb.roi_area(payload.roiPoints, payload.areaId or 1,
+                       payload.areaName or "检测区", payload.areaType or "POLYGON")
     async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
         data = await DeviceService.list_agents(client, device_obj, db)
         if data is None:

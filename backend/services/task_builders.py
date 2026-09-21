@@ -25,11 +25,136 @@ def full_frame_area(area_id: int = 1, name: str = "区域1") -> dict:
     }
 
 
-def roi_area(points) -> dict:
-    """给定归一化多边形点则构造检测区（areaName=检测区/POLYGON），为空则回退全画面。"""
-    if points:
-        return {"areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": points}
-    return full_frame_area()
+def round_points(points, nd: int = 2) -> List[dict]:
+    """归一化多边形点 [{x,y}] 统一保留 nd 位小数（默认两位，非法点直接丢弃）。
+
+    设备侧坐标是 0~1 的画面占比，两位小数（≈画面 1%）已足够，
+    避免把画布点击算出的 0.2487 这类长尾小数原样下发。
+    """
+    out: List[dict] = []
+    for p in points or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            out.append({"x": round(float(p.get("x", 0)), nd), "y": round(float(p.get("y", 0)), nd)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def round_area(area: Optional[dict], nd: int = 2) -> Optional[dict]:
+    """检测区整体的坐标取整（返回新 dict；area 为空或无点时原样返回）。
+
+    用于【直接拿设备读回的 area 重下】的路径（编辑保存 / 自动调优），
+    这些 area 不经 roi_area，故在 build_rule / build_agent_config 里兜底。
+    """
+    if not area or not area.get("points"):
+        return area
+    return {**area, "points": round_points(area.get("points"), nd)}
+
+
+def roi_area(points, area_id: int = 1, area_name: str = "检测区",
+             area_type: str = "POLYGON") -> dict:
+    """给定归一化多边形点则构造检测区，为空则回退全画面（沿用同一 areaId/areaName）。
+
+    areaId / areaName / areaType 来自面板第②步 ROI 池的【用户配置】（前端逐项随 roiPoints 一起下发），
+    缺省才回落旧默认值（1 / 检测区 / POLYGON）。同一任务内 areaId 必须唯一，
+    多算法/多智能体一次下发时由 dedupe_area_ids 兜底去重。
+    """
+    try:
+        aid = int(area_id)
+    except (TypeError, ValueError):
+        aid = 1
+    if aid < 1:
+        aid = 1
+    pts = round_points(points)   # 归一化坐标保留两位小数后下发
+    if pts:
+        return {
+            "areaId": aid,
+            "areaName": area_name or "检测区",
+            "areaType": (area_type or "POLYGON").upper(),
+            "points": pts,
+        }
+    return full_frame_area(aid, area_name or "区域1")
+
+
+def _area_geometry_key(area: dict) -> tuple:
+    """检测区的几何身份 = (areaType, 归一化点序列)：用于判定两项是否为【同一块区域】。"""
+    pts = []
+    for p in area.get("points") or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            pts.append((round(float(p.get("x", 0)), 4), round(float(p.get("y", 0)), 4)))
+        except (TypeError, ValueError):
+            continue
+    return ((area.get("areaType") or "POLYGON").upper(), tuple(pts))
+
+
+def dedupe_area_ids(areas: Optional[List[dict]]) -> List[dict]:
+    """保证同一任务内 areaId 唯一（就地改写并返回）。
+
+    - 几何完全相同的检测区（多算法共用同一块 ROI / 同为全画面）沿用【同一个】areaId；
+    - 几何不同却撞号时，后者顺延到最小空闲正整数，避免设备侧互相覆盖。
+    前端已按 ROI 池分配唯一号，这里是下发前的最后一道兜底（对话/模板/旧快照可能不带号）。
+    """
+    assigned: dict = {}   # 几何 → 已分配 areaId
+    taken: set = set()
+    for area in areas or []:
+        if not isinstance(area, dict):
+            continue
+        key = _area_geometry_key(area)
+        if key in assigned:
+            area["areaId"] = assigned[key]
+            continue
+        try:
+            aid = int(area.get("areaId", 1))
+        except (TypeError, ValueError):
+            aid = 1
+        if aid < 1:
+            aid = 1
+        while aid in taken:
+            aid += 1
+        area["areaId"] = aid
+        taken.add(aid)
+        assigned[key] = aid
+    return areas or []
+
+
+def assign_unique_area_id(area: Optional[dict], rules: Optional[List[dict]]) -> Optional[dict]:
+    """把一块新检测区并入【设备上已有的规则集合】时保证 areaId 唯一（就地改写并返回该 area）。
+
+    与 dedupe_area_ids 同语义：几何完全相同的区域沿用已有 areaId；几何不同却撞号时顺延到最小空闲号。
+    供『向已下发任务的同一算法仓追加算法』复用（rules = 该仓已有 rulesParams）。
+    """
+    if not isinstance(area, dict):
+        return area
+    key = _area_geometry_key(area)
+    used = set()
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        for existing in rule.get("areas") or []:
+            if not isinstance(existing, dict):
+                continue
+            try:
+                aid = int(existing.get("areaId"))
+            except (TypeError, ValueError):
+                continue
+            if _area_geometry_key(existing) == key:   # 同一块区域：沿用设备上的号
+                area["areaId"] = aid
+                return area
+            used.add(aid)
+    try:
+        aid = int(area.get("areaId", 1))
+    except (TypeError, ValueError):
+        aid = 1
+    if aid < 1:
+        aid = 1
+    while aid in used:
+        aid += 1
+    area["areaId"] = aid
+    return area
 
 
 def index_agents(data: dict) -> dict:
@@ -55,7 +180,7 @@ def build_agent_config(agent: dict, area: Optional[dict] = None) -> dict:
     - filter_enable 关闭时强制清空 filter_keywords（避免下发无意义的过滤词）；
     - areas 恒为单 ROI（缺省全画面），符合「每个智能体只关联一个检测区」。
     """
-    area = area or full_frame_area()
+    area = round_area(area) or full_frame_area()
     filter_enable = bool(agent.get("filter_enable", False))
     return {
         "schedule_plan_id": "1",
@@ -149,13 +274,41 @@ def build_single_point_task_payload(
     }
 
 
+def target_size(value, default: float) -> float:
+    """目标大小（设备 targetMax/targetMin）归一化为 0~1、保留两位小数。
+
+    量纲约定：设备侧是【目标框占画面的比例】0~1；面板/UI 口径是 0~100 的百分比，
+    由前端下发前折算。这里对 >1 的入参（旧前端、对话直传百分比）再兜一次底按百分比换算，
+    并把越界值截断回 [0,1]，保证下发到设备的恒为合法比例。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = float(default)
+    if v > 1:
+        v /= 100.0
+    return round(min(1.0, max(0.0, v)), 2)
+
+
+def panel_target_size(value):
+    """target_size 的逆映射：设备 0~1 → 面板「目标大小」0~100（整数）。
+
+    兼容历史上按 0~100 直接下发的旧任务：>1 的值视为本就是百分比，原样带回。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    return round(v * 100) if v <= 1 else round(v)
+
+
 def build_rule(
     event_type: str,
     area: Optional[dict] = None,
     target_types: Optional[List[str]] = None,
     threshold: float = 0.3,
-    target_max: int = 1,
-    target_min: int = 0,
+    target_max: float = 1.0,
+    target_min: float = 0.0,
     duration: int = 3,
     cooldown: int = 600,
     agent_llm: Optional[dict] = None,
@@ -170,12 +323,13 @@ def build_rule(
     带扩图 target_expand（缺省对称默认值）。ruleId 由 build_warehouse_monitor 统一重排为 1..N，
     ruleCustomName 同样由其统一赋为 str(monitor_id)（本函数只产出与 monitor 无关的字段）。
     threshold 入参为【标量】，下发时按设备格式包成 {eventType: 值}（传字典则原样透传）。
+    target_max/target_min 为【目标大小】，设备口径 0~1 两位小数（面板 0~100 由 target_size 折算）。
     """
-    area = area or full_frame_area()
+    area = round_area(area) or full_frame_area()
     target_types = target_types or ["PERSON"]
     extend_params = {
-        "targetMax": target_max,
-        "targetMin": target_min,
+        "targetMax": target_size(target_max, 1),
+        "targetMin": target_size(target_min, 0),
         "duration": duration,
         "cooldownDuration": cooldown,
         # 设备侧 threshold 是按事件类型分别配置的字典（一条规则一个 eventType，故只有一项）
@@ -317,8 +471,8 @@ def build_monitor_payload(
     area: Optional[dict] = None,
     target_types: Optional[List[str]] = None,
     threshold: float = 0.3,
-    target_max: int = 1,
-    target_min: int = 0,
+    target_max: float = 1.0,
+    target_min: float = 0.0,
     duration: int = 3,
     cooldown: int = 600,
     agent_llm: Optional[dict] = None,
@@ -431,6 +585,29 @@ def _is_full_frame(points: Optional[List[dict]]) -> bool:
     )
 
 
+def _full_roi_pool_item() -> dict:
+    """面板 ROI 池里的默认「全屏检测」伪项（areaId=1，下发时回落 full_frame_area）。"""
+    return {"id": "full", "name": "全屏检测", "points": [], "areaId": 1, "areaType": "POLYGON"}
+
+
+def _roi_pool_item(roi_id: str, area: dict, seq: int) -> dict:
+    """设备上的一块 areas[i] → 面板 ROI 池项：带回设备侧的 areaName/areaId/areaType。
+
+    缺 areaName 时按池内序号兜底成「检测区N」；areaId 缺失留 None，由前端池不变式补唯一号。
+    """
+    try:
+        aid = int(area.get("areaId"))
+    except (TypeError, ValueError):
+        aid = None
+    return {
+        "id": roi_id,
+        "name": area.get("areaName") or f"检测区{seq}",
+        "points": area.get("points") or [],
+        "areaId": aid,
+        "areaType": (area.get("areaType") or "POLYGON").upper(),
+    }
+
+
 def _task_mode(task: dict, mon: Optional[dict]) -> str:
     """任务类型 → 面板分支标识：agent（纯大模型）/ combined（小+大）/ smallmodel（纯小模型）。"""
     if (task or {}).get("task_type") == "agent_real_task":
@@ -446,19 +623,21 @@ def _agent_task_panel(task: dict) -> dict:
     """纯大模型任务(agent_real_task) → 面板 config 的 agents[] / rois[] / activeAgentIndex 还原。
 
     每个 agent 的检测区在其 agent_config.areas[0]；全画面归一化到共享的 'full' 项，
-    其余各自生成 '检测区N' 并让该 agent 的 roiId 指向它（每 agent 单 ROI）。
+    其余各自生成池项（名称/areaId/areaType 取设备上的 areaName/areaId/areaType，缺失才按序号兜底）
+    并让该 agent 的 roiId 指向它（每 agent 单 ROI）。
     注意：task_list 无 alarm_type，故 agents[].alarm_type 缺省，属性型开关在查看模式 best-effort。
     """
-    rois = [{"id": "full", "name": "全屏检测", "points": []}]
+    rois = [_full_roi_pool_item()]
     agents = []
     for i, item in enumerate((task or {}).get("agent_list") or []):
         item = item or {}
         cfg = item.get("agent_config") or {}
         areas = cfg.get("areas") or []
-        points = (areas[0].get("points") if areas and isinstance(areas[0], dict) else None) or []
+        area = areas[0] if areas and isinstance(areas[0], dict) else {}
+        points = area.get("points") or []
         if points and not _is_full_frame(points):
             roi_id = f"roi_{i}"
-            rois.append({"id": roi_id, "name": f"检测区{len(rois)}", "points": points})
+            rois.append(_roi_pool_item(roi_id, area, len(rois)))
         else:
             roi_id = "full"
         agents.append({
@@ -514,9 +693,9 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
 
     ep = rule.get("extendParams") or {}
     if "targetMax" in ep:
-        cfg["maxTarget"] = ep.get("targetMax")
+        cfg["maxTarget"] = panel_target_size(ep.get("targetMax"))
     if "targetMin" in ep:
-        cfg["minTarget"] = ep.get("targetMin")
+        cfg["minTarget"] = panel_target_size(ep.get("targetMin"))
     if "duration" in ep:
         cfg["intrusionDuration"] = ep.get("duration")
     if "cooldownDuration" in ep:
@@ -549,17 +728,19 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
 
     字段抽取与 monitor_to_panel_config 一致（阈值/目标/时长/冷却/扩图/二次大模型），但产出【逐算法】形状：
     kind + event_type + algo_cabin_name + 各参数 + 绑定池 ROI 的 roiId（全画面归一化到 'full'）。
-    rois 为共享池，就地追加非全画面 ROI（每条算法各自一个 ROI，直接兑现『不同算法不同 ROI』）。
+    rois 为共享池，就地追加非全画面 ROI（每条算法各自一个 ROI，直接兑现『不同算法不同 ROI』），
+    池项带回设备侧的 areaName/areaId/areaType，使『查看→编辑→重下』不丢用户配置的区域号与名称。
     """
     ep = rule.get("extendParams") or {}
     agent_llm = (ep.get("aiotapCustom") or {}).get("agentLLMParam") or {}
     kind = "combined" if agent_llm else "small"
 
     areas = rule.get("areas") or []
-    points = (areas[0].get("points") if areas and isinstance(areas[0], dict) else None) or []
+    area = areas[0] if areas and isinstance(areas[0], dict) else {}
+    points = area.get("points") or []
     if points and not _is_full_frame(points):
         roi_id = f"roi_{len(rois)}"
-        rois.append({"id": roi_id, "name": f"检测区{len(rois)}", "points": points})
+        rois.append(_roi_pool_item(roi_id, area, len(rois)))
         use_full = False
     else:
         roi_id = "full"
@@ -574,9 +755,9 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
         "useFullFrame": use_full,
     }
     if "targetMax" in ep:
-        item["maxTarget"] = ep.get("targetMax")
+        item["maxTarget"] = panel_target_size(ep.get("targetMax"))
     if "targetMin" in ep:
-        item["minTarget"] = ep.get("targetMin")
+        item["minTarget"] = panel_target_size(ep.get("targetMin"))
     if "duration" in ep:
         item["intrusionDuration"] = ep.get("duration")
     if "cooldownDuration" in ep:
@@ -640,7 +821,7 @@ def monitors_to_panel_config(task: dict, monitors: Optional[List[dict]]) -> dict
     if task and task.get("task_name"):
         cfg["name"] = task.get("task_name")
 
-    rois: List[dict] = [{"id": "full", "name": "全屏检测", "points": []}]
+    rois: List[dict] = [_full_roi_pool_item()]
     algorithms: List[dict] = []
     mode = "smallmodel"
     for mon in monitors or []:

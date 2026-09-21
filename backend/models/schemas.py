@@ -29,6 +29,8 @@ class AgentTaskItem(BaseModel):
     """智能体任务(agent_real_task)中关联的单个智能体及其检测区/过滤配置。
 
     roiPoints：归一化多边形点 [{x,y}]；为空表示全画面检测。
+    areaId/areaName/areaType：该检测区在设备侧的区域号/名称/几何类型，取自面板第②步 ROI 池的用户配置
+    （areaId 同一任务内必须唯一，下发前由 task_builders.dedupe_area_ids 兜底去重）。
     filter_enable/filter_keywords：仅描述型(freeform)智能体有意义，其余下发时强制关闭。
     """
     event_id: str
@@ -39,6 +41,9 @@ class AgentTaskItem(BaseModel):
     filter_enable: bool = False
     filter_keywords: str = ""
     roiPoints: List[dict] = []
+    areaId: Optional[int] = None
+    areaName: Optional[str] = None
+    areaType: Optional[str] = None
 
 class AgentTaskDeploy(BaseModel):
     """纯大模型智能体任务下发请求体（最多关联 4 个智能体）。"""
@@ -52,6 +57,7 @@ class SmallModelTaskDeploy(BaseModel):
 
     面板/对话下发共用；threshold 为设备 monitor 的单一阈值（前端按 yoloTarget 选好后传入）。
     roiPoints：归一化多边形点 [{x,y}]，为空表示全画面检测。
+    areaId/areaName/areaType：该检测区在设备侧的区域号/名称/几何类型（来自面板 ROI 池的用户配置，areaId 任务内唯一）。
     小模型/小+大为【实时分析】，无分析间隔/抽帧间隔概念（仅智能体任务有分析间隔）。
     """
     channel_device_id: int
@@ -61,11 +67,15 @@ class SmallModelTaskDeploy(BaseModel):
     version: str = "V2.0.0"
     target_types: Optional[List[str]] = None
     threshold: float = 0.3
-    target_max: int = 1
-    target_min: int = 0
+    # 目标大小=目标框占画面比例，设备口径 0~1（两位小数）；面板 0~100 由前端折算后传入
+    target_max: float = 1.0
+    target_min: float = 0.0
     duration: int = 3
     cooldown: int = 600
     roiPoints: List[dict] = []
+    areaId: Optional[int] = None
+    areaName: Optional[str] = None
+    areaType: Optional[str] = None
 
 class CombinedTaskDeploy(SmallModelTaskDeploy):
     """小+大任务下发请求体：在纯小模型基础上追加二次大模型（agentLLMParam）与扩图策略。
@@ -88,6 +98,8 @@ class WarehouseAlgorithmItem(BaseModel):
     kind：'small' 纯小模型 / 'combined' 小+大（挂二次大模型 agentLLMParam）。
     算法身份 = (algo_cabin_name, event_type)；同仓 event_type 不得重复（设备按仓覆盖规则）。
     roiPoints：本算法自己的归一化多边形点 [{x,y}]，为空表示全画面检测（逐算法各自一个 ROI）。
+    areaId/areaName/areaType：该检测区在设备侧的区域号/名称/几何类型，取自面板第②步 ROI 池的用户配置；
+    同一任务内 areaId 必须唯一（多条算法共用同一块 ROI 时共享同一 areaId），下发前由 dedupe_area_ids 兜底。
     combined 专用：agent_id 必填，其余智能体字段缺省沿用设备端该智能体自身配置；target_expand 为扩图策略；
     filter_enable/filter_keywords 仅描述型(freeform)智能体有意义，其余下发时强制关闭。
     """
@@ -97,11 +109,15 @@ class WarehouseAlgorithmItem(BaseModel):
     version: str = "V2.0.0"
     target_types: Optional[List[str]] = None
     threshold: float = 0.3
-    target_max: int = 1
-    target_min: int = 0
+    # 目标大小=目标框占画面比例，设备口径 0~1（两位小数）；面板 0~100 由前端折算后传入
+    target_max: float = 1.0
+    target_min: float = 0.0
     duration: int = 3
     cooldown: int = 600
     roiPoints: List[dict] = []
+    areaId: Optional[int] = None
+    areaName: Optional[str] = None
+    areaType: Optional[str] = None
     # combined 专用
     agent_id: Optional[str] = None
     event_tag: str = ""

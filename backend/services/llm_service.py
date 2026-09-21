@@ -77,8 +77,8 @@ class LLMService:
         prompt_instruction = f"""你是安防摄像头小模型检测算法的参数调优专家。
 当前算法(event_id={event_id})的检测参数为：
 - 检测阈值 threshold = {current.get('threshold')}（0~1，越高越严格、越不易触发）
-- 目标最大尺寸 target_max = {current.get('target_max')}
-- 目标最小尺寸 target_min = {current.get('target_min')}
+- 目标最大尺寸 target_max = {current.get('target_max')}（0~1，目标框占画面比例）
+- 目标最小尺寸 target_min = {current.get('target_min')}（0~1，目标框占画面比例）
 
 用户标注样本的送检小图（目标裁切）尺寸如下：
 【正报 · 应保留】共{len(valid)}个：{_fmt(valid)}
@@ -89,11 +89,11 @@ class LLMService:
 2. 若误报与正报尺寸重叠，则通过适度提高 threshold 抑制误报；正报偏少或阈值本已偏高时避免过度收紧。
 在保证正报仍能触发的前提下给出更合理的新值。
 
-请严格以 JSON 返回（数值型，threshold 保留两位小数，target_* 为整数或与原值同量纲的数值）：
+请严格以 JSON 返回（数值型，threshold 与 target_* 均保留两位小数，target_* 取值范围 0~1 且 target_min ≤ target_max）：
 {{
     "threshold": 0.0,
-    "target_max": 0,
-    "target_min": 0,
+    "target_max": 1.0,
+    "target_min": 0.0,
     "reason": "调整依据..."
 }}"""
 

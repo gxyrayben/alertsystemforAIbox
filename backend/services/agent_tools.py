@@ -295,12 +295,16 @@ def _rule_from_existing(rule: dict, args: dict) -> dict:
 
     用于 update_device_task 的『只改传入项』：threshold/target_max/target_min/duration/cooldown/
     target_types/roiPoints/target_expand/prompt(仅小+大)；eventType 保持不变。
+    只换 roiPoints 时沿用原检测区的 areaId/areaName/areaType（区域身份不变，只换几何）。
     """
     ep = rule.get("extendParams") or {}
     areas = rule.get("areas") or []
     orig_area = areas[0] if areas and isinstance(areas[0], dict) else None
     roi_points = args.get("roiPoints")
-    area = ({"areaId": 1, "areaName": "检测区", "areaType": "POLYGON", "points": roi_points}
+    area = (tb.roi_area(roi_points,
+                        (orig_area or {}).get("areaId") or 1,
+                        (orig_area or {}).get("areaName") or "检测区",
+                        (orig_area or {}).get("areaType") or "POLYGON")
             if roi_points else orig_area)
     # 小+大：保留原 agentLLMParam，仅按需覆盖 prompt（纯小模型 orig_agent_llm 为 None）
     orig_agent_llm = (ep.get("aiotapCustom") or {}).get("agentLLMParam")
@@ -460,8 +464,8 @@ TOOLS = [
                 "algo_cabin_name": {"type": "string", "description": "可选，要修改算法所在的算法仓名（多算法/跨仓时用于定位；单算法任务可省略）"},
                 "event_type":      {"type": "string", "description": "可选，要修改的算法事件类型（同仓多算法时用于定位；单算法任务可省略）"},
                 "threshold":       {"type": "number", "description": "报警阈值 0~1"},
-                "target_max":      {"type": "integer", "description": "最大目标数"},
-                "target_min":      {"type": "integer", "description": "最小目标数"},
+                "target_max":      {"type": "number", "description": "最大目标大小(目标框占画面比例)，0~1两位小数"},
+                "target_min":      {"type": "number", "description": "最小目标大小(目标框占画面比例)，0~1两位小数"},
                 "duration":        {"type": "integer", "description": "持续时长(秒)"},
                 "cooldown":        {"type": "integer", "description": "报警间隔/冷却时长(秒)"},
                 "target_types":    {"type": "array", "items": {"type": "string"}, "description": "检测目标类型，如 [PERSON]"},
@@ -490,8 +494,8 @@ TOOLS = [
                 "version":         {"type": "string", "description": "可选，算法版本，默认 V2.0.0"},
                 "target_types":    {"type": "array", "items": {"type": "string"}, "description": "检测目标类型，如 [PERSON]，默认 [PERSON]"},
                 "threshold":       {"type": "number", "description": "报警阈值 0~1，默认0.3"},
-                "target_max":      {"type": "integer", "description": "最大目标数，默认1"},
-                "target_min":      {"type": "integer", "description": "最小目标数，默认0"},
+                "target_max":      {"type": "number", "description": "最大目标大小(目标框占画面比例)，0~1两位小数，默认1"},
+                "target_min":      {"type": "number", "description": "最小目标大小(目标框占画面比例)，0~1两位小数，默认0"},
                 "duration":        {"type": "integer", "description": "持续时长(秒)，默认3"},
                 "cooldown":        {"type": "integer", "description": "报警间隔/冷却时长(秒)，默认600"},
                 "roiPoints":       {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]，为空则全画面"},
@@ -975,6 +979,8 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
             monitor_id = common.get("monitor_id")
             monitor_name = common.get("monitor_name")
             version = labels.get("version") or args.get("version", "V2.0.0")
+            # 同仓内 areaId 唯一：同几何沿用原号，撞号则顺延（就地改写 new_rule 的 areas[0]）
+            tb.assign_unique_area_id(area, rules)
             new_rules = list(rules) + [new_rule]
         else:
             # 跨仓新增：该仓需要【独立的 monitor_id】（与任务已有仓共用会互相覆盖），按规律顺延分配

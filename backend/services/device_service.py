@@ -475,8 +475,8 @@ class DeviceService:
             for at in c.get("alertor_type", []):
                 event_type = at.get("alertor_type", "")
                 rows.append({
-                    "algoCabinName": w.get("alg_name", ""),
-                    "version": w.get("alg_version", "V2.0.0"),
+                    "algoCabinName": w.get("alg_warehouse_type", ""), #w.get("alg_name", ""),
+                    "version": "V2.0.0",#w.get("alg_version", "V2.0.0").split("_")[-1].split(".sdk")[0],  #w.get("alg_version", "V2.0.0")
                     "eventType": event_type,
                     "eventName": algorithm_catalog.event_name(event_type),  # 英文算法ID → 中文事件名
                     "targetTypes": at.get("target_type", []),
@@ -536,8 +536,8 @@ class DeviceService:
         area: Optional[dict] = None,
         target_types: Optional[List[str]] = None,
         threshold: float = 0.3,
-        target_max: int = 1,
-        target_min: int = 0,
+        target_max: float = 1.0,
+        target_min: float = 0.0,
         duration: int = 3,
         cooldown: int = 600,
         agent_llm: Optional[dict] = None,
@@ -558,6 +558,7 @@ class DeviceService:
         task_res = await DeviceService.create_task(client, device, db, task_payload)
         if not task_res or task_res.get("code") != 0:
             msg = (task_res or {}).get("message") or "设备不可达或返回错误"
+            print("创建任务失败，设备返回:", json.dumps(task_res, ensure_ascii=False))
             return False, f"创建任务失败：{msg}", None
         task_id = (task_res.get("data") or {}).get("task_id")
         if not task_id:
@@ -612,6 +613,7 @@ class DeviceService:
         task_res = await DeviceService.create_task(client, device, db, task_payload)
         if not task_res or task_res.get("code") != 0:
             msg = (task_res or {}).get("message") or "设备不可达或返回错误"
+            #print("创建任务失败，设备返回:", json.dumps(task_res, ensure_ascii=False))
             return False, f"创建任务失败：{msg}", None
         task_id = (task_res.get("data") or {}).get("task_id")
         if not task_id:
@@ -644,10 +646,11 @@ class DeviceService:
                 task_id, channel_device_id, cabin, rules,
                 version=group[0].get("version", "V2.0.0"), seq=seq,
             )
-            print("下发 monitor payload:", monitor_payload)
+            #print("下发 monitor payload:", json.dumps(monitor_payload))
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:
                 msg = (mon_res or {}).get("message") or "设备不可达或返回错误"
+                #print(f"算法仓「{cabin}」monitor 下发失败，设备返回:", json.dumps(mon_res, ensure_ascii=False))
                 failed.append(f"「{cabin}」：{msg}")
 
         if failed:
@@ -831,6 +834,7 @@ class DeviceService:
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:
                 msg = (mon_res or {}).get("message") or "设备不可达或返回错误"
+                #print(f"算法仓「{cabin}」monitor 下发失败，设备返回:", json.dumps(mon_res, ensure_ascii=False))
                 failed.append(f"「{cabin}」：{msg}")
 
         # ④ 编辑中被移除的仓：设备无删除接口，原规则原样重下但置 enable=False
