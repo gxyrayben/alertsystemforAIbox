@@ -208,6 +208,19 @@
         ? config.yoloTargets
         : [YOLO_TO_TARGET[config.yoloTarget] || 'PERSON'];
     let targetPickerOpen = false;
+    // 下拉面板的展开方向/最大高度按按钮在视口中的实际可用空间计算：
+    // 该控件位于第三步面板底部，固定「向下 + max-h-44」时会被外层滚动容器裁掉，导致选项看不全。
+    let targetPickerUp = false;      // true = 向上展开
+    let targetPickerMaxH = 200;      // 面板最大高度(px)，超出则面板内部滚动
+    function toggleTargetPicker(e) {
+        if (targetPickerOpen) { targetPickerOpen = false; return; }
+        const r = e.currentTarget.getBoundingClientRect();
+        const below = window.innerHeight - r.bottom - 12;   // 按钮下方剩余空间
+        const above = r.top - 12;                            // 按钮上方剩余空间
+        targetPickerUp = below < 160 && above > below;       // 下方不够且上方更宽裕时翻转向上
+        targetPickerMaxH = Math.max(120, Math.min(300, targetPickerUp ? above : below));
+        targetPickerOpen = true;
+    }
 
     // 勾选/取消一个检测目标：至少保留一个；主目标(yoloTarget)恒跟随首个已选目标，阈值字段随之切换
     function toggleTargetType(tt, checked) {
@@ -1498,10 +1511,12 @@
             </div>
         </div>
 
-        <div class="bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden">
-            <div class="overflow-x-auto">
+        <!-- shrink-0：本卡片带 overflow-hidden，在父级 flex 列中 min-height 会被算成 0，任务多时整张表会被压缩裁掉且没有滚动条。
+             内层限高 + overflow-auto：任务多时表体自己出纵向滚动条，表头 sticky 常驻。 -->
+        <div class="bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden shrink-0">
+            <div class="overflow-auto" style="max-height:calc(100vh - 300px)">
                 <table class="w-full text-left border-collapse text-[11px]">
-                    <thead class="bg-slate-900/60 text-[10px] text-slate-400">
+                    <thead class="bg-slate-900 text-[10px] text-slate-400 sticky top-0 z-10 shadow-sm">
                         <tr>
                             <th class="px-3 py-2.5 font-medium whitespace-nowrap">任务ID</th>
                             <th class="px-3 py-2.5 font-medium whitespace-nowrap">任务名称</th>
@@ -1991,8 +2006,10 @@
             <!-- ③ 详情参数：逐算法 / 逐智能体配置（当前编辑对象见上方切换器）；未激活时保持原空面板样式 -->
             {#if !monitorActive || wizardStep === 3}
             <div class="space-y-4">
-                <div class="bg-slate-950 p-5 rounded-2xl border border-slate-800 shadow-lg relative overflow-hidden">
-                    <div class="absolute top-0 right-0 h-16 w-16 bg-indigo-500/5 rounded-bl-full flex items-center justify-end pr-4 pt-4 pointer-events-none">
+                <!-- 不能加 overflow-hidden：它既会裁掉「检测目标」下拉面板，又会让本卡片在父级 flex 列中 min-height 归零被压缩。
+                     右上角装饰块改用 rounded-tr-2xl 自行对齐圆角，视觉与原先一致。 -->
+                <div class="bg-slate-950 p-5 rounded-2xl border border-slate-800 shadow-lg relative shrink-0">
+                    <div class="absolute top-0 right-0 h-16 w-16 bg-indigo-500/5 rounded-bl-full rounded-tr-2xl flex items-center justify-end pr-4 pt-4 pointer-events-none">
                         <i class="fa-solid fa-code-merge text-indigo-500/40 text-base animate-pulse"></i>
                     </div>
                     <h3 class="font-bold text-white text-xs mb-4 flex items-center">
@@ -2085,29 +2102,42 @@
                                 <input type="range" min="0.1" max="0.9" step="0.01" value={config[threshKey]} on:input={(e) => setThresh(e.target.value)} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
                             </div>
                             <!-- 检测目标：多目标勾选（设备 targetTypes）；首个勾选项即主目标，决定上面用哪条阈值 -->
-                            <div class="relative">
+                            <div>
                                 <label class="block text-[10px] text-slate-400 mb-1">检测目标（可多选）</label>
-                                <button type="button" on:click={() => (targetPickerOpen = !targetPickerOpen)}
-                                        class="w-full flex items-center justify-between gap-2 bg-slate-950 border border-slate-800 hover:border-amber-500/50 text-slate-200 rounded p-1.5 text-[11px] text-left transition-colors">
-                                    <span class="truncate">{selectedTargets.map(targetTypeLabel).join('、') || '请选择检测目标'}</span>
-                                    <i class="fa-solid fa-chevron-down text-[9px] text-slate-500 shrink-0"></i>
-                                </button>
-                                {#if targetPickerOpen}
-                                    <!-- 透明遮罩：点击面板外即收起下拉 -->
-                                    <button type="button" aria-label="关闭检测目标选择" class="fixed inset-0 z-10 cursor-default" on:click={() => (targetPickerOpen = false)}></button>
-                                    <div class="absolute z-20 mt-1 w-full bg-slate-950 border border-slate-800 rounded shadow-lg shadow-black/40 p-1 max-h-44 overflow-y-auto">
-                                        {#each targetTypeOptions as tt}
-                                            <label class="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-slate-900 text-[11px] {selectedTargets.includes(tt) ? 'text-amber-400 font-bold' : 'text-slate-300'}">
-                                                <input type="checkbox" checked={selectedTargets.includes(tt)}
-                                                       on:change={(e) => toggleTargetType(tt, e.target.checked)}
-                                                       class="w-3 h-3 text-amber-500 bg-slate-950 border-slate-700 rounded cursor-pointer" />
-                                                <span class="truncate">{targetTypeLabel(tt)}</span>
-                                                <span class="ml-auto text-[9px] font-mono text-slate-600">{tt}</span>
-                                            </label>
-                                        {/each}
-                                    </div>
-                                {/if}
-                                <p class="text-[9px] text-slate-500 mt-1">首个勾选目标为主目标（决定上方检测阈值取用的字段）。</p>
+                                <!-- relative 只包住「按钮 + 下拉面板」，使向上展开(bottom-full)时紧贴按钮，不被 label/说明文字顶开 -->
+                                <div class="relative">
+                                    <!-- 多选结果用可换行的标签块展示：目标名较长(如「人员 (人体检测)」)，单行 truncate 会看不全 -->
+                                    <button type="button" on:click={toggleTargetPicker}
+                                            title={selectedTargets.map(targetTypeLabel).join('、')}
+                                            class="w-full flex items-start justify-between gap-2 bg-slate-950 border border-slate-800 hover:border-amber-500/50 text-slate-200 rounded p-1.5 text-[11px] text-left transition-colors">
+                                        <span class="flex flex-wrap gap-1 min-w-0">
+                                            {#each selectedTargets as tt}
+                                                <span class="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/30 leading-tight">{targetTypeLabel(tt)}</span>
+                                            {:else}
+                                                <span class="text-slate-500 py-0.5 leading-tight">请选择检测目标</span>
+                                            {/each}
+                                        </span>
+                                        <i class="fa-solid fa-chevron-down text-[9px] text-slate-500 shrink-0 mt-1 transition-transform {targetPickerOpen ? 'rotate-180' : ''}"></i>
+                                    </button>
+                                    {#if targetPickerOpen}
+                                        <!-- 透明遮罩：点击面板外即收起下拉 -->
+                                        <button type="button" aria-label="关闭检测目标选择" class="fixed inset-0 z-30 cursor-default" on:click={() => (targetPickerOpen = false)}></button>
+                                        <!-- 方向与高度由 toggleTargetPicker 实时计算，选项多时面板内部滚动，不再被父容器裁切 -->
+                                        <div class="absolute left-0 w-full z-40 {targetPickerUp ? 'bottom-full mb-1' : 'top-full mt-1'} bg-slate-950 border border-slate-700 rounded shadow-xl shadow-black/60 p-1 overflow-y-auto overscroll-contain"
+                                             style="max-height:{targetPickerMaxH}px">
+                                            {#each targetTypeOptions as tt}
+                                                <label class="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-slate-900 text-[11px] {selectedTargets.includes(tt) ? 'text-amber-400 font-bold' : 'text-slate-300'}">
+                                                    <input type="checkbox" checked={selectedTargets.includes(tt)}
+                                                           on:change={(e) => toggleTargetType(tt, e.target.checked)}
+                                                           class="w-3 h-3 shrink-0 text-amber-500 bg-slate-950 border-slate-700 rounded cursor-pointer" />
+                                                    <span class="leading-tight">{targetTypeLabel(tt)}</span>
+                                                    <span class="ml-auto shrink-0 text-[9px] font-mono text-slate-600">{tt}</span>
+                                                </label>
+                                            {/each}
+                                        </div>
+                                    {/if}
+                                </div>
+                                <p class="text-[9px] text-slate-500 mt-1">首个勾选目标为主目标（决定上方检测阈值取用的字段）。已选 {selectedTargets.length} / 共 {targetTypeOptions.length} 个目标。</p>
                             </div>
                         </div>
 
