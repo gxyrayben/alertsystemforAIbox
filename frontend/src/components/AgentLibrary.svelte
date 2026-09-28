@@ -213,7 +213,7 @@
                 </div>
                 <div>
                     <label class="text-[11px] text-slate-400">报警条件 (可选，留空按类型默认)</label>
-                    <input bind:value={form.alarm_condition} placeholder="留空即可，如 only_yes / none"
+                    <input bind:value={form.alarm_condition} placeholder="留空即可，如 only_yes / only_no / none"
                         class="w-full mt-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-indigo-500 outline-none" />
                 </div>
             </div>

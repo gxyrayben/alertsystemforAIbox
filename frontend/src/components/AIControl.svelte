@@ -143,6 +143,13 @@
     $: activeAgent = (config.agents || [])[config.activeAgentIndex] || null;
     // 算法仓任务的当前编辑算法项（与 activeAgent 镜像，仅第③步详情参数使用）
     $: activeAlgorithm = (config.algorithms || [])[config.activeAlgorithmIndex] || null;
+    // 当前智能体的报警类型（描述型 freeform / 判断型 yesno）：查看设备既有大模型任务时，
+    // task_list 不回传 alarm_type，故按 event_id 到设备智能体目录(availableAgents)反查，
+    // 否则描述型会被误按判断型渲染（第③步的两套配置项就串了）。
+    // 目录也查不到时兜底 freeform，与后端 _enrich_agent_items / _agent_task_panel 的兜底口径一致。
+    $: activeAgentAlarmType = activeAgent?.alarm_type
+        || availableAgents.find((a) => String(a.event_id) === String(activeAgent?.event_id))?.alarm_type
+        || 'freeform';
     // 第②步的绘制对象是【检测区本身】，与当前算法/智能体无关：画完再在对应关系表里勾选关联项
     $: drawingRoi = (config.rois || []).find((r) => r.id === drawingRoiId) || null;
     // 绘制目标被删除 / 换任务重载配置后不在池中：复位为「待新建」，避免画布指向幽灵区域
@@ -464,11 +471,88 @@
         } : a);
     }
 
-    // 判断型(yesno)智能体的报警条件：勾选=only_yes（仅「是」报警），不勾=none（是/否都报警）
-    function setAgentAlarmCondition(onlyYes) {
+    // ── 判断型(yesno)智能体的「预警条件」：支持同时勾选「是」与「否」────────────────
+    // 设备侧 alarm_condition 三态与勾选组合的对应：
+    //   仅勾「是」→ only_yes；仅勾「否」→ only_no；两项都勾 → none（是/否都报警）。
+    // 设备无「都不报警」语义，故两项都不勾非法（下方处理函数会还原勾选态并提示）。
+    // 缺省/未知值（含查看旧任务时设备不回传 alarm_type/alarm_condition）按判断型默认 only_yes 解析，
+    // 与后端 _default_alarm_condition 的推导保持一致。
+    function alarmConditionFlags(cond) {
+        const c = String(cond || 'only_yes').toLowerCase();
+        if (c === 'only_no') return { yes: false, no: true };
+        if (c === 'none') return { yes: true, no: true };
+        return { yes: true, no: false };   // only_yes / 缺省 / 未知值
+    }
+    // 由勾选态反推 alarm_condition；返回 '' 表示非法组合（两项都不勾）
+    function alarmConditionFromFlags(yes, no) {
+        if (yes && no) return 'none';
+        if (yes) return 'only_yes';
+        if (no) return 'only_no';
+        return '';
+    }
+    // 当前预警条件的中文说明（面板回显）
+    function alarmConditionLabel(cond) {
+        const f = alarmConditionFlags(cond);
+        const c = alarmConditionFromFlags(f.yes, f.no);
+        return c === 'only_yes' ? 'only_yes —— 仅判定为「是」时报警'
+            : c === 'only_no' ? 'only_no —— 仅判定为「否」时报警'
+            : 'none —— 判定为「是」或「否」都报警';
+    }
+    // 勾选/取消一项预警条件：两项都不勾时把 DOM 勾选态还原，保证至少保留一项
+    function toggleAgentAlarmCondition(kind, checked, ev) {
         if (!activeAgent) return;
+        const f = alarmConditionFlags(activeAgent.alarm_condition);
+        const next = { ...f, [kind]: checked };
+        const cond = alarmConditionFromFlags(next.yes, next.no);
+        if (!cond) {
+            if (ev?.target) ev.target.checked = true;   // 还原：本次取消不生效
+            showToast('预警条件至少需要勾选「是」或「否」其中一项。', 'warning');
+            return;
+        }
         const idx = config.activeAgentIndex;
-        config.agents = config.agents.map((a, i) => i === idx ? { ...a, alarm_condition: onlyYes ? 'only_yes' : 'none' } : a);
+        config.agents = config.agents.map((a, i) => i === idx ? { ...a, alarm_condition: cond } : a);
+    }
+    // 小+大协同算法项的同款预警条件写入（就地改当前算法项，第③步用）
+    function toggleAlgoAlarmCondition(kind, checked, ev) {
+        const i = config.activeAlgorithmIndex || 0;
+        const cur = (config.algorithms || [])[i] || {};
+        const f = alarmConditionFlags(cur.alarm_condition);
+        const next = { ...f, [kind]: checked };
+        const cond = alarmConditionFromFlags(next.yes, next.no);
+        if (!cond) {
+            if (ev?.target) ev.target.checked = true;
+            showToast('预警条件至少需要勾选「是」或「否」其中一项。', 'warning');
+            return;
+        }
+        setAlgoAgentField(i, 'alarm_condition', cond);
+    }
+
+    // 小+大协同：切换二次大模型的报警类型时，一并复位类型专属条件
+    // （判断型走 alarm_condition、描述型走 filter_*，两者互不通用），避免上一个类型的值残留；
+    // 复位为 null 后由后端 _default_alarm_condition 按新类型推导（yesno→only_yes / freeform→none），
+    // 与智能体任务 changeAgent「换智能体即改用新智能体自身条件」的口径一致。
+    function changeAlgoAlarmType(i, value) {
+        config.algorithms = config.algorithms.map((a, idx) => idx === i ? {
+            ...a, alarm_type: value, alarm_condition: null, filter_enable: false, filter_keywords: ''
+        } : a);
+    }
+
+    // ── 「字符匹配」（描述型条件判断的关键词 filter_keywords）：仅接受英文与数字 ──
+    // 用户只能输入英文/数字，中文、空格、标点等非法字符在输入瞬间被剔除，不落入 config、也不下发给设备。
+    const MATCH_TEXT_RE = /[^A-Za-z0-9]/g;
+    const sanitizeMatchText = (v) => String(v ?? '').replace(MATCH_TEXT_RE, '');
+    // 智能体任务逐项写回字符匹配：先净化，再回写 DOM，避免非法字符残留在输入框里
+    function onAgentMatchInput(ev) {
+        const clean = sanitizeMatchText(ev.target.value);
+        if (ev.target.value !== clean) ev.target.value = clean;
+        const idx = config.activeAgentIndex;
+        config.agents = config.agents.map((a, i) => i === idx ? { ...a, filter_keywords: clean } : a);
+    }
+    // 小+大协同算法项写回字符匹配（同上净化 + 回写 DOM）
+    function onAlgoMatchInput(i, ev) {
+        const clean = sanitizeMatchText(ev.target.value);
+        if (ev.target.value !== clean) ev.target.value = clean;
+        setAlgoAgentField(i, 'filter_keywords', clean);
     }
 
     // 拉取设备可选智能体列表（refresh=false 用快照，离线安全）供下拉展示
@@ -2053,34 +2137,45 @@
                                     <div class="flex justify-between items-center mb-1"><label class="text-[10px] text-slate-400">智能体 Prompt 策略（{activeAgent.event_tag || '当前智能体'}）</label><span class="text-[9px] text-slate-600">Markdown语义控制</span></div>
                                     <textarea bind:value={activeAgent.prompt} on:input={() => (config.agents = [...config.agents])} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="等待指令注入..."></textarea>
                                 </div>
-                                {#if activeAgent.alarm_type === 'freeform'}
+                                {#if activeAgentAlarmType === 'freeform'}
+                                    <!-- 描述型(freeform)：条件判断开关 + 字符匹配（filter_enable / filter_keywords），命中才上报。
+                                         字符匹配只接受英文与数字（输入瞬间由 onAgentMatchInput 净化）。 -->
                                     <div class="pt-1 border-t border-slate-800/60">
                                         <div class="flex items-center justify-between">
-                                            <label class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-filter mr-1.5 text-indigo-400"></i>条件判断（属性分析）</label>
+                                            <label class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-filter mr-1.5 text-indigo-400"></i>条件判断</label>
                                             <input type="checkbox" bind:checked={activeAgent.filter_enable} on:change={() => (config.agents = [...config.agents])} class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
                                         </div>
                                         {#if activeAgent.filter_enable}
-                                            <input type="text" bind:value={activeAgent.filter_keywords} on:input={() => (config.agents = [...config.agents])} placeholder="过滤条件关键词，例如：红色上衣 / 未戴安全帽" class="mt-2 w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]" />
+                                            <input type="text" value={activeAgent.filter_keywords || ''} on:input={onAgentMatchInput}
+                                                   placeholder="字符匹配：请输入英文或数字，例如 red / 1234"
+                                                   class="mt-2 w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px] font-mono" />
+                                            <p class="mt-1 text-[9px] text-slate-500">仅支持英文与数字，其它字符（中文/空格/符号）输入时自动忽略。</p>
                                         {/if}
                                     </div>
                                 {:else}
-                                    <!-- 判断型(yesno)智能体：报警条件 alarm_condition —— 勾选=仅「是」报警(only_yes)，不勾=是/否都报警(none)。
-                                         缺省(null)时按后端 _default_alarm_condition 推导为 only_yes，故勾选态默认为真。 -->
+                                    <!-- 判断型(yesno)智能体：预警条件 alarm_condition —— 勾选=仅「是」报警(only_yes)、仅「否」报警(only_no)、两者都报警(none)。
+                                         缺省(null)时（含查看旧任务时设备不回传）按判断型默认 only_yes 解析，与后端 _default_alarm_condition 一致。
+                                         预警条件支持同时勾选「是」与「否」：仅勾是→only_yes / 仅勾否→only_no / 都勾→none（是/否都报警）；
+                                         两项都不勾非法，toggleAgentAlarmCondition 会还原勾选态并提示。 -->
                                     <div class="pt-1 border-t border-slate-800/60">
                                         <div class="flex items-center justify-between">
-                                            <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-question mr-1.5 text-indigo-400"></i>条件判断（是 / 否）</span>
-                                            <label class="flex items-center gap-1.5 cursor-pointer">
-                                                <span class="text-[9px] text-slate-500">仅判定为「是」时报警</span>
-                                                <input type="checkbox" checked={(activeAgent.alarm_condition || 'only_yes') === 'only_yes'}
-                                                       on:change={(e) => setAgentAlarmCondition(e.target.checked)}
-                                                       class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
-                                            </label>
+                                            <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-question mr-1.5 text-indigo-400"></i>预警条件<span class="text-[9px] text-slate-500 ml-1.5">可同时勾选</span></span>
+                                            <div class="flex items-center gap-3">
+                                                <label class="flex items-center gap-1.5 cursor-pointer">
+                                                    <span class="text-[10px] text-slate-300">是</span>
+                                                    <input type="checkbox" checked={alarmConditionFlags(activeAgent.alarm_condition).yes}
+                                                           on:change={(e) => toggleAgentAlarmCondition('yes', e.target.checked, e)}
+                                                           class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
+                                                </label>
+                                                <label class="flex items-center gap-1.5 cursor-pointer">
+                                                    <span class="text-[10px] text-slate-300">否</span>
+                                                    <input type="checkbox" checked={alarmConditionFlags(activeAgent.alarm_condition).no}
+                                                           on:change={(e) => toggleAgentAlarmCondition('no', e.target.checked, e)}
+                                                           class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
+                                                </label>
+                                            </div>
                                         </div>
-                                        <p class="mt-1.5 text-[9px] text-slate-500 leading-relaxed">
-                                            {(activeAgent.alarm_condition || 'only_yes') === 'only_yes'
-                                                ? '当前：only_yes —— 大模型判定为「是」才产生报警（推荐，判断型默认值）。'
-                                                : '当前：none —— 判定为「是」或「否」都产生报警。'}
-                                        </p>
+                                        <p class="mt-1.5 text-[9px] text-slate-500 leading-relaxed">当前：{alarmConditionLabel(activeAgent.alarm_condition)}</p>
                                     </div>
                                 {/if}
                             </div>
@@ -2231,7 +2326,7 @@
                             <div>
                                 <label class="block text-[10px] text-slate-400 mb-1">报警类型 (alarm_type)</label>
                                 <select value={activeAlgorithm?.alarm_type || 'freeform'}
-                                        on:change={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'alarm_type', e.target.value)}
+                                        on:change={(e) => changeAlgoAlarmType(config.activeAlgorithmIndex || 0, e.target.value)}
                                         class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-indigo-500 text-[11px]">
                                     <option value="freeform">描述型（freeform）· 输出自然语言描述</option>
                                     <option value="yesno">判断型（yesno）· 输出是 / 否</option>
@@ -2242,32 +2337,44 @@
                                 <textarea bind:value={config.prompt} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="等待指令注入..."></textarea>
                             </div>
                             {#if (activeAlgorithm?.alarm_type || 'freeform') === 'freeform'}
-                                <!-- 描述型：关键词过滤（filter_enable/filter_keywords），命中关键词才上报 -->
+                                <!-- 描述型：条件判断开关 + 字符匹配（filter_enable/filter_keywords），命中才上报 -->
                                 <div class="pt-1 border-t border-slate-800/60">
                                     <div class="flex items-center justify-between">
-                                        <label class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-filter mr-1.5 text-indigo-400"></i>条件判断（属性分析）</label>
+                                        <label class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-filter mr-1.5 text-indigo-400"></i>条件判断</label>
                                         <input type="checkbox" checked={!!activeAlgorithm?.filter_enable}
                                                on:change={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'filter_enable', e.target.checked)}
                                                class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
                                     </div>
                                     {#if activeAlgorithm?.filter_enable}
                                         <input type="text" value={activeAlgorithm?.filter_keywords || ''}
-                                               on:input={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'filter_keywords', e.target.value)}
-                                               placeholder="过滤条件关键词，例如：红色上衣 / 未戴安全帽"
-                                               class="mt-2 w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]" />
+                                               on:input={(e) => onAlgoMatchInput(config.activeAlgorithmIndex || 0, e)}
+                                               placeholder="字符匹配：请输入英文或数字，例如 red / 1234"
+                                               class="mt-2 w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px] font-mono" />
                                     {/if}
-                                    <p class="text-[9px] text-slate-500 mt-1">仅描述型生效：大模型描述命中关键词才上报告警。</p>
+                                    <p class="text-[9px] text-slate-500 mt-1">仅描述型生效：只支持英文与数字（其它字符输入时自动忽略），大模型描述命中该字符才上报告警。</p>
                                 </div>
                             {:else}
-                                <!-- 判断型(yesno)：报警条件 alarm_condition —— 勾选=仅「是」报警(only_yes)，不勾=是/否都报警(none) -->
+                                <!-- 判断型(yesno)：预警条件支持同时勾选「是」与「否」
+                                     仅勾是→only_yes / 仅勾否→only_no / 都勾→none（是/否都报警）；两项都不勾非法 -->
                                 <div class="pt-1 border-t border-slate-800/60">
-                                    <label class="flex items-center justify-between cursor-pointer">
-                                        <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-check mr-1.5 text-indigo-400"></i>仅在判定为「是」时报警</span>
-                                        <input type="checkbox" checked={(activeAlgorithm?.alarm_condition || '') === 'only_yes'}
-                                               on:change={(e) => setAlgoAgentField(config.activeAlgorithmIndex || 0, 'alarm_condition', e.target.checked ? 'only_yes' : 'none')}
-                                               class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
-                                    </label>
-                                    <p class="text-[9px] text-slate-500 mt-1">不勾选则是 / 否两种判定都会上报（alarm_condition=none）。</p>
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-check mr-1.5 text-indigo-400"></i>预警条件<span class="text-[9px] text-slate-500 ml-1.5">可同时勾选</span></span>
+                                        <div class="flex items-center gap-3">
+                                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                                <span class="text-[10px] text-slate-300">是</span>
+                                                <input type="checkbox" checked={alarmConditionFlags(activeAlgorithm?.alarm_condition).yes}
+                                                       on:change={(e) => toggleAlgoAlarmCondition('yes', e.target.checked, e)}
+                                                       class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
+                                            </label>
+                                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                                <span class="text-[10px] text-slate-300">否</span>
+                                                <input type="checkbox" checked={alarmConditionFlags(activeAlgorithm?.alarm_condition).no}
+                                                       on:change={(e) => toggleAlgoAlarmCondition('no', e.target.checked, e)}
+                                                       class="w-3.5 h-3.5 text-indigo-600 bg-slate-950 border-slate-800 rounded cursor-pointer" />
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <p class="text-[9px] text-slate-500 mt-1">当前：{alarmConditionLabel(activeAlgorithm?.alarm_condition)}</p>
                                 </div>
                             {/if}
                         </div>
