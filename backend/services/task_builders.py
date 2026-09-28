@@ -302,6 +302,59 @@ def panel_target_size(value):
     return round(v * 100) if v <= 1 else round(v)
 
 
+# 『人数类』算法：设备靠 extendParams.custom.<键>.objCount 判断超过/少于多少人，
+# 故这两个 eventType 必须额外下发人员数量；其余算法不写 custom 字段，保持 payload 干净。
+PERSON_COUNT_CUSTOM_KEYS = {
+    "PERSON_OVER_QUERYING": "personOverQuerying",   # 超员：画面人数【超过】objCount 报警
+    "PERSON_LESS_QUERYING": "personLessQuerying",   # 少员：画面人数【少于】objCount 报警
+}
+DEFAULT_OBJ_COUNT = 2            # 未指定人数时的兜底值（与面板默认值一致）
+OBJ_COUNT_MIN, OBJ_COUNT_MAX = 0, 100
+
+
+def person_count_custom_key(event_type: Optional[str]) -> Optional[str]:
+    """event_type → extendParams.custom 下的人数参数键；非超员/少员算法返回 None。"""
+    return PERSON_COUNT_CUSTOM_KEYS.get(str(event_type or "").upper())
+
+
+def clamp_obj_count(value, default: int = DEFAULT_OBJ_COUNT) -> int:
+    """人员数量归一化：取整并截断到 [0,100]（面板与对话入参都经由此处）。"""
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        n = int(default)
+    return min(OBJ_COUNT_MAX, max(OBJ_COUNT_MIN, n))
+
+
+def build_person_count_custom(event_type: Optional[str], obj_count=None) -> Optional[dict]:
+    """超员/少员算法的 extendParams.custom：{"personOverQuerying": {"objCount": N}}。
+
+    非人数类算法返回 None（调用方据此不写 custom 字段）。
+    """
+    key = person_count_custom_key(event_type)
+    if not key:
+        return None
+    return {key: {"objCount": clamp_obj_count(obj_count)}}
+
+
+def rule_obj_count(extend_params: Optional[dict], event_type: Optional[str] = None):
+    """build_person_count_custom 的逆映射：从规则 extendParams 读回人员数量（无则 None）。
+
+    优先取 event_type 对应的键；取不到时在两个已知键里兜一次，
+    使 eventType 缺失/大小写异常的老数据也能把用户配置的人数带回面板。
+    """
+    custom = (extend_params or {}).get("custom") or {}
+    if not isinstance(custom, dict):
+        return None
+    keys = [k for k in (person_count_custom_key(event_type),) if k]
+    keys += [v for v in PERSON_COUNT_CUSTOM_KEYS.values() if v not in keys]
+    for key in keys:
+        node = custom.get(key)
+        if isinstance(node, dict) and node.get("objCount") is not None:
+            return clamp_obj_count(node.get("objCount"))
+    return None
+
+
 def build_rule(
     event_type: str,
     area: Optional[dict] = None,
@@ -314,6 +367,8 @@ def build_rule(
     agent_llm: Optional[dict] = None,
     target_expand: Optional[dict] = None,
     rule_id: int = 1,
+    obj_count=None,
+    custom: Optional[dict] = None,
 ) -> dict:
     """构造 monitor.warehouse_v20_param.rulesParams 中的【单条规则】(= 一个小模型算法)。
 
@@ -324,6 +379,8 @@ def build_rule(
     ruleCustomName 同样由其统一赋为 str(monitor_id)（本函数只产出与 monitor 无关的字段）。
     threshold 入参为【标量】，下发时按设备格式包成 {eventType: 值}（传字典则原样透传）。
     target_max/target_min 为【目标大小】，设备口径 0~1 两位小数（面板 0~100 由 target_size 折算）。
+    obj_count 为【人员数量】，仅超员/少员算法有意义：写入 extendParams.custom.<键>.objCount（0~100）；
+    custom 用于沿用设备侧已有的其他 custom 子键（改任务时先读回再重建，避免把未知字段抹掉）。
     """
     area = round_area(area) or full_frame_area()
     target_types = target_types or ["PERSON"]
@@ -337,6 +394,15 @@ def build_rule(
         "targetTypes": target_types,
         "level": "ALARM_LEVEL",
     }
+    # 人数类算法(超员/少员)：补齐 custom.<键>.objCount；未显式给人数时沿用 custom 里已有的值
+    merged_custom = dict(custom) if isinstance(custom, dict) else {}
+    if obj_count is None:
+        obj_count = rule_obj_count({"custom": merged_custom}, event_type)
+    person_custom = build_person_count_custom(event_type, obj_count)
+    if person_custom:
+        merged_custom.update(person_custom)
+    if merged_custom:
+        extend_params["custom"] = merged_custom
     if agent_llm:
         extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm} ### 这里不对 gxyrayben
         extend_params["analysis_mode"] = "full_analysis"
@@ -478,12 +544,15 @@ def build_monitor_payload(
     agent_llm: Optional[dict] = None,
     target_expand: Optional[dict] = None,
     seq: int = 1,
+    obj_count=None,
+    custom: Optional[dict] = None,
 ) -> dict:
     """算法仓任务第二步 monitor（【单算法】便捷入口，委托到 build_rule + build_warehouse_monitor）。
 
     agent_llm 非空时挂载 aiotapCustom.agentLLMParam 并切换 analysis_mode=full_analysis，
     即『小+大』任务；为空则是『纯小模型』任务。
     target_expand 为『小+大』任务的扩图策略（缺省对称默认值），仅在 agent_llm 非空分支内生效。
+    obj_count/custom 透传给 build_rule（超员/少员的人员数量，详见该函数）。
     monitor_id 缺省由 (task_id, seq) 派生（单算法即单仓，故 seq 默认 1 → task_id*100+1）。
     需要在同一算法仓挂多条算法、或跨仓增删改时，请直接用 build_rule + build_warehouse_monitor。
     """
@@ -498,6 +567,8 @@ def build_monitor_payload(
         cooldown=cooldown,
         agent_llm=agent_llm,
         target_expand=target_expand,
+        obj_count=obj_count,
+        custom=custom,
     )
     return build_warehouse_monitor(
         task_id,
@@ -707,6 +778,10 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
     if "threshold" in ep:
         # 设备侧 threshold 为 {eventType: 值} 字典，按 targetTypes 落到对应的面板阈值字段
         cfg[_thresh_key(ep.get("targetTypes"))] = rule_threshold(ep, rule.get("eventType"))
+    # 人数类算法(超员/少员)：把 custom 里的人员数量带回面板，其余算法无此字段
+    _obj_count = rule_obj_count(ep, rule.get("eventType"))
+    if _obj_count is not None:
+        cfg["objCount"] = _obj_count
 
     # 扩图区域仅『小+大』任务的 monitor 才有 target_expand
     expand = ep.get("target_expand") or {}
@@ -769,6 +844,10 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
     if "threshold" in ep:
         # 设备侧 threshold 为 {eventType: 值} 字典，按 targetTypes 落到对应的面板阈值字段
         item[_thresh_key(ep.get("targetTypes"))] = rule_threshold(ep, rule.get("eventType"))
+    # 人数类算法(超员/少员)：把 custom 里的人员数量带回面板，其余算法无此字段
+    _obj_count = rule_obj_count(ep, rule.get("eventType"))
+    if _obj_count is not None:
+        item["objCount"] = _obj_count
 
     # 扩图区域仅『小+大』规则才有 target_expand
     expand = ep.get("target_expand") or {}

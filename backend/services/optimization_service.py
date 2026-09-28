@@ -220,6 +220,8 @@ async def _optimize_monitor(client, device, db, task: dict, mon: dict,
         duration=ep.get("duration", 3),
         cooldown=ep.get("cooldownDuration", 600),
         agent_llm=agent_llm,
+        # 调优只改阈值/目标大小：人数类算法(超员/少员)的 custom 原样透传，避免把用户配的人数冲掉
+        custom=ep.get("custom"),
     )
 
     res = await DeviceService.create_monitor(client, device, db, payload)

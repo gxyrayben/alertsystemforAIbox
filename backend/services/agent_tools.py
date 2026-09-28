@@ -294,7 +294,7 @@ def _rule_from_existing(rule: dict, args: dict) -> dict:
     """基于设备上已有的一条 rule，用 args 里【显式给出】的项覆盖，重建这条 rule（未给的沿用原值）。
 
     用于 update_device_task 的『只改传入项』：threshold/target_max/target_min/duration/cooldown/
-    target_types/roiPoints/target_expand/prompt(仅小+大)；eventType 保持不变。
+    target_types/roiPoints/target_expand/obj_count(超员/少员人数)/prompt(仅小+大)；eventType 保持不变。
     只换 roiPoints 时沿用原检测区的 areaId/areaName/areaType（区域身份不变，只换几何）。
     """
     ep = rule.get("extendParams") or {}
@@ -324,6 +324,9 @@ def _rule_from_existing(rule: dict, args: dict) -> dict:
         cooldown=args.get("cooldown", ep.get("cooldownDuration", 600)),
         agent_llm=agent_llm,
         target_expand=args.get("target_expand") or ep.get("target_expand"),
+        # 人数类算法：未显式改人数时沿用设备上的 objCount；custom 整体透传，避免抹掉其他子键
+        obj_count=args.get("obj_count"),
+        custom=ep.get("custom"),
     )
 
 
@@ -471,6 +474,7 @@ TOOLS = [
                 "target_types":    {"type": "array", "items": {"type": "string"}, "description": "检测目标类型，如 [PERSON]"},
                 "roiPoints":       {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]"},
                 "target_expand":   {"type": "object", "description": "扩图策略{top,bottom,left,right}（仅小+大生效）"},
+                "obj_count":       {"type": "integer", "description": "人员数量 0~100，仅超员(PERSON_OVER_QUERYING)/少员(PERSON_LESS_QUERYING)算法生效：超员=画面人数超过该值报警，少员=少于该值报警"},
                 "prompt":          {"type": "string", "description": "覆盖二次大模型提示词（仅小+大生效）"},
             },
             "required": ["device_id", "task_id"],
@@ -500,6 +504,7 @@ TOOLS = [
                 "cooldown":        {"type": "integer", "description": "报警间隔/冷却时长(秒)，默认600"},
                 "roiPoints":       {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]，为空则全画面"},
                 "target_expand":   {"type": "object", "description": "扩图策略{top,bottom,left,right}（仅小+大生效）"},
+                "obj_count":       {"type": "integer", "description": "人员数量 0~100，仅超员(PERSON_OVER_QUERYING)/少员(PERSON_LESS_QUERYING)算法生效：超员=画面人数超过该值报警，少员=少于该值报警；不传默认2"},
                 "prompt":          {"type": "string", "description": "二次大模型/智能体提示词（小+大或纯大模型）"},
                 "filter_enable":   {"type": "boolean", "description": "纯大模型描述型智能体：是否启用关键词过滤"},
                 "filter_keywords": {"type": "string", "description": "纯大模型描述型智能体：过滤关键词"},
@@ -959,7 +964,8 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
             target_types=args.get("target_types"), threshold=args.get("threshold", 0.3),
             target_max=args.get("target_max", 1), target_min=args.get("target_min", 0),
             duration=args.get("duration", 3), cooldown=args.get("cooldown", 600),
-            agent_llm=agent_llm, target_expand=args.get("target_expand"))
+            agent_llm=agent_llm, target_expand=args.get("target_expand"),
+            obj_count=args.get("obj_count"))
 
         # 读取任务全部 monitor，判断目标仓是否已存在
         mon_res = await DeviceService.authed_post(

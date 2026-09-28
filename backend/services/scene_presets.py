@@ -66,6 +66,20 @@ _PRESETS: Dict[str, dict] = {
         "cropLeft": 0.6,
         "cropRight": 0.6,
     },
+    # 超员：人数类算法，objCount=允许的人数上限（画面人数【超过】该值报警），需持续一会儿避免人流瞬时穿行误报
+    "PERSON_OVER_QUERYING": {
+        "yoloTarget": "human",
+        "objCount": 3,
+        "intrusionDuration": 5,
+        "alarmInterval": 30,
+    },
+    # 少员：人数类算法，objCount=要求的最少在岗人数（画面人数【少于】该值报警），时长更长以滤掉短暂离岗
+    "PERSON_LESS_QUERYING": {
+        "yoloTarget": "human",
+        "objCount": 2,
+        "intrusionDuration": 10,
+        "alarmInterval": 30,
+    },
 }
 
 

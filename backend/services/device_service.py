@@ -542,6 +542,7 @@ class DeviceService:
         cooldown: int = 600,
         agent_llm: Optional[dict] = None,
         target_expand: Optional[dict] = None,
+        obj_count: Optional[int] = None,
     ) -> Tuple[bool, str, Optional[str]]:
         """算法仓任务两步下发的共享封装（纯小模型 & 小+大共用）。
 
@@ -549,6 +550,7 @@ class DeviceService:
         返回 (成功?, 中文消息, task_id)。部分失败语义：任务已建但 monitor 失败时，
         返回 (False, 孤儿提示, task_id)，让调用方能把 task_id 回传便于排查/清理。
         agent_llm 非空即『小+大』任务，target_expand 仅在该分支生效（见 build_monitor_payload）。
+        obj_count 为人员数量，仅超员/少员算法生效（见 build_rule）。
         小模型/小+大为【实时分析】，无分析间隔/抽帧间隔概念（见 build_single_point_task_payload）。
         """
         # 第一步：创建 single_point_task 拿 task_id
@@ -572,6 +574,7 @@ class DeviceService:
             target_max=target_max, target_min=target_min,
             duration=duration, cooldown=cooldown,
             agent_llm=agent_llm, target_expand=target_expand,
+            obj_count=obj_count,
         )
         mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
         if not mon_res or mon_res.get("code") != 0:
@@ -639,6 +642,8 @@ class DeviceService:
                     cooldown=algo.get("cooldown", 600),
                     agent_llm=algo.get("agent_llm"),
                     target_expand=algo.get("target_expand"),
+                    # 人数类算法(超员/少员)：人员数量 → extendParams.custom.<键>.objCount
+                    obj_count=algo.get("obj_count"),
                 )
                 for algo in group
             ]
@@ -817,6 +822,8 @@ class DeviceService:
                     cooldown=algo.get("cooldown", 600),
                     agent_llm=algo.get("agent_llm"),
                     target_expand=algo.get("target_expand"),
+                    # 人数类算法(超员/少员)：人员数量 → extendParams.custom.<键>.objCount
+                    obj_count=algo.get("obj_count"),
                 )
                 for algo in group
             ]

@@ -72,6 +72,8 @@ class SmallModelTaskDeploy(BaseModel):
     target_min: float = 0.0
     duration: int = 3
     cooldown: int = 600
+    # 人员数量(0~100)：仅超员/少员算法有意义，下发进 extendParams.custom.<键>.objCount
+    obj_count: Optional[int] = None
     roiPoints: List[dict] = []
     areaId: Optional[int] = None
     areaName: Optional[str] = None
@@ -114,6 +116,8 @@ class WarehouseAlgorithmItem(BaseModel):
     target_min: float = 0.0
     duration: int = 3
     cooldown: int = 600
+    # 人员数量(0~100)：仅超员/少员算法有意义，下发进 extendParams.custom.<键>.objCount
+    obj_count: Optional[int] = None
     roiPoints: List[dict] = []
     areaId: Optional[int] = None
     areaName: Optional[str] = None

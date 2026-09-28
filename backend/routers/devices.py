@@ -231,6 +231,8 @@ async def _enrich_warehouse_algorithms(
             "cooldown": item.cooldown,
             "agent_llm": agent_llm,
             "target_expand": target_expand,
+            # 人员数量：仅超员/少员算法有意义，由 build_rule 决定是否写入 extendParams.custom
+            "obj_count": item.obj_count,
         })
     tb.dedupe_area_ids([e["area"] for e in enriched])
     return enriched
@@ -293,6 +295,7 @@ async def deploy_smallmodel_task(device_id: str, payload: SmallModelTaskDeploy, 
             cooldown=payload.cooldown,
             agent_llm=None,
             target_expand=None,
+            obj_count=payload.obj_count,
         )
     if not ok:
         raise HTTPException(status_code=502, detail=msg)
@@ -353,6 +356,7 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
             cooldown=payload.cooldown,
             agent_llm=agent_llm,
             target_expand=payload.target_expand,
+            obj_count=payload.obj_count,
         )
     if not ok:
         raise HTTPException(status_code=502, detail=msg)

@@ -42,6 +42,8 @@
         cropUp: 0.5, cropDown: 0.3, cropLeft: 0.4, cropRight: 0.6,
         // 目标大小（面板 0~100 百分比，下发时折算成设备 targetMax/targetMin 的 0~1）：最小 0~100、最大 50~100
         maxTarget: 100, minTarget: 0, roiPoints: [],
+        // 人员数量（0~100）：仅超员/少员算法用，下发进 extendParams.custom.<键>.objCount
+        objCount: 2,
         event_type: '', algo_cabin_name: '',    // 算法标识（propose/对话填充；查看态无来源，靠 deploy() guard 拦截）
         // 智能体任务（agent_real_task）专用：
         taskMode: 'smallmodel',   // 'agent' | 'smallmodel' | 'combined'
@@ -183,6 +185,21 @@
     // 三阈值收敛为「检测目标 + 该目标阈值」一组控件：面板仍按目标写回对应字段（与后端 _thresh_key 对齐）
     $: threshKey = config.yoloTarget === 'vehicle' ? 'yoloVehicleThresh'
         : config.yoloTarget === 'human' ? 'yoloHumanThresh' : 'yoloNonMotorThresh';
+
+    // ── 人数类算法（超员/少员）：额外配置「人员数量」，下发进 extendParams.custom.<键>.objCount ──
+    // 设备靠该值判断画面人数是超过还是少于目标人数；其余算法不展示本项、也不下发 custom。
+    const PERSON_COUNT_EVENTS = {
+        PERSON_OVER_QUERYING: { label: '人员数量（超员阈值）', hint: '画面内人数【超过】该值时报警' },
+        PERSON_LESS_QUERYING: { label: '人员数量（少员阈值）', hint: '画面内人数【少于】该值时报警' }
+    };
+    const personCountMeta = (et) => PERSON_COUNT_EVENTS[String(et || '').toUpperCase()] || null;
+    const OBJ_COUNT_MIN = 0, OBJ_COUNT_MAX = 100;   // 设备侧 objCount 取值范围
+    const clampObjCount = (v) => {
+        const n = Math.round(Number(v));
+        return Number.isFinite(n) ? Math.min(OBJ_COUNT_MAX, Math.max(OBJ_COUNT_MIN, n)) : 2;
+    };
+    // 当前算法是否需要人员数量：以算法项的 event_type 为准（多算法各自独立）
+    $: personCountInfo = personCountMeta(activeAlgorithm?.event_type || config.event_type);
 
     // ── 检测目标（设备 targetTypes）：支持多目标勾选 ───────────────────────
     // 选项优先取算法目录里该算法自带的 targetTypes（设备真实能力），取不到时用通用兜底集。
@@ -556,6 +573,8 @@
             yoloHumanThresh: defaultConfig.yoloHumanThresh, yoloVehicleThresh: defaultConfig.yoloVehicleThresh,
             yoloNonMotorThresh: defaultConfig.yoloNonMotorThresh,
             intrusionDuration: defaultConfig.intrusionDuration, alarmInterval: defaultConfig.alarmInterval,
+            // 人员数量：仅超员/少员算法会用到并下发，其余算法该值闲置
+            objCount: defaultConfig.objCount,
             cropUp: defaultConfig.cropUp, cropDown: defaultConfig.cropDown, cropLeft: defaultConfig.cropLeft, cropRight: defaultConfig.cropRight
         };
         if (kind === 'combined') {
@@ -754,7 +773,7 @@
     // 使单算法面板显示/编辑的是「当前算法」的真实值（下发时当前项也回读顶层，保持一致）。
     const PANEL_PARAM_KEYS = ['maxTarget', 'minTarget', 'yoloHumanThresh', 'yoloVehicleThresh',
         'yoloNonMotorThresh', 'yoloTarget', 'yoloTargets', 'intrusionDuration', 'alarmInterval',
-        'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'prompt', 'agentType'];
+        'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'objCount', 'prompt', 'agentType'];
     function hoistItemParams(item) {
         const out = {};
         for (const k of PANEL_PARAM_KEYS) if (item && item[k] !== undefined) out[k] = item[k];
@@ -1088,6 +1107,8 @@
                 areaName: roi.name || '检测区',
                 areaType: roi.areaType || AREA_TYPE_POLYGON
             };
+            // 人数类算法(超员/少员)：额外下发人员数量，后端据 event_type 写入 extendParams.custom.<键>.objCount
+            if (personCountMeta(algo.event_type)) algo.obj_count = clampObjCount(p.objCount ?? defaultConfig.objCount);
             if (kind === 'combined') {
                 // 小+大：追加扩图策略（target_expand 仅小+大生效）+ 二次大模型全量参数
                 algo.target_expand = {
@@ -2074,6 +2095,22 @@
                                 <span class="font-extrabold text-amber-400 flex items-center"><i class="fa-solid fa-microchip mr-1.5"></i> 1. 前置轻量级算法配置</span>
                                 <span class="text-[9px] text-slate-500">端侧低算力常驻运行</span>
                             </div>
+                            <!-- 人员数量：仅「超员 / 少员」这类人数算法展示；下发进 extendParams.custom.<键>.objCount（0-100），
+                                 设备端据此判定画面人数是超过还是少于目标人数。其余算法不展示、也不下发该字段。 -->
+                            {#if personCountInfo}
+                                <div class="bg-amber-500/5 border border-amber-500/30 rounded-lg p-2.5">
+                                    <div class="flex items-center justify-between gap-2">
+                                        <label for="objCountInput" class="text-[10px] text-amber-300 flex items-center">
+                                            <i class="fa-solid fa-users mr-1.5"></i>{personCountInfo.label}
+                                        </label>
+                                        <input id="objCountInput" type="number" min="0" max="100" step="1"
+                                               bind:value={config.objCount}
+                                               on:change={(e) => (config.objCount = clampObjCount(e.target.value))}
+                                               class="w-20 bg-slate-950 border border-amber-500/40 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
+                                    </div>
+                                    <p class="text-[9px] text-slate-500 mt-1.5 leading-relaxed">{personCountInfo.hint}；取值 0-100，由设备端按该人数判定。</p>
+                                </div>
+                            {/if}
                             <!-- 延迟报警(duration) / 报警间隔(cooldownDuration)：单位秒 -->
                             <div class="grid grid-cols-2 gap-3">
                                 <div>

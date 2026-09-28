@@ -29,7 +29,8 @@ def validate_warehouse_deploy(body) -> List[str]:
     """算法仓任务（纯小模型 / 小+大 / 混合）多算法下发校验，返回中文错误串列表（空=通过）。
 
     规则：至少 1 条算法；每条须有 event_type 与 algo_cabin_name；阈值 0<threshold≤1；
-    target_min≤target_max；duration≥0；cooldown≥0；同一算法仓内 event_type 不得重复
+    target_min≤target_max；duration≥0；cooldown≥0；人员数量 0≤obj_count≤100（超员/少员）；
+    同一算法仓内 event_type 不得重复
     （设备按仓覆盖 rulesParams、规则身份=eventType，同仓重复会互相顶掉）；
     combined 算法另需 agent_id（二次大模型智能体标识）。
     """
@@ -64,6 +65,11 @@ def validate_warehouse_deploy(body) -> List[str]:
         cooldown = getattr(algo, "cooldown", 600)
         if cooldown is not None and cooldown < 0:
             errors.append(f"{label}的报警间隔(cooldown)不能为负")
+
+        # 人员数量仅超员/少员算法会下发（build_rule 按 event_type 判定），范围 0~100
+        obj_count = getattr(algo, "obj_count", None)
+        if obj_count is not None and not (0 <= obj_count <= 100):
+            errors.append(f"{label}的人员数量(obj_count)须在 0~100 之间")
 
         if (getattr(algo, "kind", "small") or "small") == "combined" and not getattr(algo, "agent_id", None):
             errors.append(f"{label}为『小+大』但缺少 agent_id（二次大模型智能体）")
