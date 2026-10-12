@@ -664,7 +664,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         device = await _get_device(db, args.get("device_id", ""))
         if not device:
             return _err("未找到设备，请先在『设备接入』添加并获取详情")
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
             pkgs, err = await _authorized_packages(client, device, db)
         if err:
             return _err(f"查询算法授权失败：{err}")
@@ -674,7 +674,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         device = await _get_device(db, args.get("device_id", ""))
         if not device:
             return _err("未找到设备，请先在『设备接入』添加并获取详情")
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
             rows, err = await _algorithm_rows(client, device, db)  # 整形逻辑抽到 _algorithm_rows 复用
         if err:
             return _err(err)
@@ -684,7 +684,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         device = await _get_device(db, args.get("device_id", ""))
         if not device:
             return _err("未找到设备，请先在『设备接入』添加并获取详情")
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
             data = await DeviceService.list_agents(client, device, db)
         if data is None:
             return _err(f"设备「{device.name}」离线或不可达，无法查询智能体算法")
@@ -706,7 +706,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         body = tb.build_agent_item_payload(
             args["event_id"], args["event_tag"], args["prompt"],
             args.get("alarm_type", "freeform"), args.get("alarm_condition"))
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
             data = await DeviceService.create_agent(client, device, db, body)
         if data is None:
             return _err(f"设备「{device.name}」离线或不可达，无法新建智能体算法")
@@ -776,7 +776,7 @@ async def _update_device_task(args: dict, db: AsyncSession) -> str:
     if not task_id:
         return _err("缺少 task_id，无法定位要更新的任务")
 
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+    async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
         # 1) 定位任务：取通道 device_id 与任务类型（agent_real_task 无 monitor，拒绝）
         task, channel_device_id, err = await _locate_device_task(client, device, db, task_id)
         if err:
@@ -893,7 +893,7 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
     if not task_id:
         return _err("缺少 task_id，无法定位要新增算法的任务")
 
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+    async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
         task, channel_device_id, err = await _locate_device_task(client, device, db, task_id)
         if err:
             return _err(err)
@@ -1035,7 +1035,7 @@ async def _remove_task_algorithm(args: dict, db: AsyncSession) -> str:
     if not task_id:
         return _err("缺少 task_id，无法定位要删除算法的任务")
 
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+    async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
         task, channel_device_id, err = await _locate_device_task(client, device, db, task_id)
         if err:
             return _err(err)
@@ -1231,7 +1231,7 @@ async def _propose_deployment(args: dict, db: AsyncSession) -> str:
     cfg = _recommended_config(args.get("task_name", "") or "AI布控任务", args.get("event_type"))
     agent = None
     algo_rows = []  # 小模型/小+大：设备算法目录（供前端 Step1 多选，与 agent 分支的 available_agents 对称）
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+    async with DeviceService.new_client(device, timeout=_HTTP_TIMEOUT) as client:
         # 小模型 / 小+大：授权门禁
         if task_type in ("smallmodel", "combined"):
             algo = args.get("algo_cabin_name")

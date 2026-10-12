@@ -24,6 +24,35 @@ def apply_device_snapshot(device_obj: DeviceORM, channels, device_tasks, algorit
     device_obj.agents = json.dumps(agents or [], ensure_ascii=False)
 
 
+# ── 设备接入协议与 TLS（HTTP / HTTPS）────────────────────────────────────
+# 每台设备自带 protocol 字段（http/https），设备侧接口路径两种协议下完全一致，只有 scheme 不同。
+DEVICE_PROTOCOLS = ("http", "https")
+DEFAULT_DEVICE_PROTOCOL = "http"
+
+
+def normalize_device_protocol(protocol: Optional[str]) -> str:
+    """设备接入协议规范化：仅接受 http / https，空值或未知值一律回落 http（老数据行为不变）。"""
+    p = (protocol or "").strip().lower()
+    return p if p in DEVICE_PROTOCOLS else DEFAULT_DEVICE_PROTOCOL
+
+
+def device_base_url(ip: str, port, protocol: Optional[str] = None) -> str:
+    """设备基址：scheme 由设备的 protocol 决定，如 https://192.168.1.10:443。"""
+    return f"{normalize_device_protocol(protocol)}://{ip}:{port}"
+
+
+def new_device_client(device=None, timeout: float = 30.0, verify: Optional[bool] = None) -> httpx.AsyncClient:
+    """统一的【设备侧】httpx 客户端工厂：集中处理证书校验策略。
+
+    - verify 缺省取设备上的 tls_verify（False = 跳过校验，兼容 BOX 常见的自签证书）；
+    - 显式传 verify 时以传入值为准（如 fetch_device_data 只拿得到 ip/port 的场景）。
+    注意：只用于调用 BOX 设备；调用公网 LLM 请用 llm_client 自己的客户端（走系统 CA 校验）。
+    """
+    if verify is None:
+        verify = bool(getattr(device, "tls_verify", False)) if device is not None else False
+    return httpx.AsyncClient(timeout=timeout, verify=verify)
+
+
 async def challenge_login(
     client: httpx.AsyncClient, base_url: str, username: str, password: str
 ) -> Tuple[bool, str, str]:
@@ -371,6 +400,19 @@ def _summarize_tasks(task_list: list, monitor_by_task: list) -> Tuple[List[dict]
 
 class DeviceService:
     @staticmethod
+    def base_url(device) -> str:
+        """设备基址（scheme 取设备 protocol 字段：http/https）。所有设备接口都应经此拼 URL。"""
+        return device_base_url(device.ip, device.port, getattr(device, "protocol", None))
+
+    @staticmethod
+    def new_client(device=None, timeout: float = 30.0) -> httpx.AsyncClient:
+        """创建【设备侧】httpx 客户端（带证书校验策略，默认跳过以兼容自签证书）。
+
+        统一入口的意义：HTTPS 下若各处自建客户端且未带 verify，设备自签证书会让所有调用直接失败。
+        """
+        return new_device_client(device, timeout=timeout)
+
+    @staticmethod
     def build_task_payload(task_obj: dict) -> dict:
         allowed_fields = ["task_id", "task_name", "task_type", "device_list", "enable", "schedule_plan_id", "analysis_interval", "agent_list"]
         payload = {k: task_obj[k] for k in allowed_fields if k in task_obj}
@@ -392,10 +434,11 @@ class DeviceService:
     ) -> Optional[dict]:
         """带 sessionID 的鉴权 POST，统一了各设备接口的『会话失效自动重登重试』逻辑。
 
+        设备侧接口路径两种协议下一致，协议取设备自身的 protocol 字段（http/https）；
         首次请求非 200 / code≠0（含会话过期）时，用 challenge_login 重登一次并重试。
         成功返回接口 JSON（dict，含 code/message，供调用方读业务错误）；网络/异常返回 None。
         """
-        base_url = f"http://{device.ip}:{device.port}"
+        base_url = DeviceService.base_url(device)
         if device.session_id:
             client.cookies.set("sessionID", device.session_id)
 
@@ -509,7 +552,7 @@ class DeviceService:
         """更新已有布控任务（PUT /intelli_manager/task，body 需含 task_id）。
         设备靠 body 里的 task_id 区分更新 vs 新建；参照 task_service 的 Prompt 优化下发用法。
         成功返回接口 JSON（dict，含 code/message），网络/异常返回 None。"""
-        base_url = f"http://{device.ip}:{device.port}"
+        base_url = DeviceService.base_url(device)
         if device.session_id:
             client.cookies.set("sessionID", device.session_id)
         try:
@@ -931,8 +974,14 @@ class DeviceService:
 
     @staticmethod
     async def fetch_device_data(
-        ip: str, port: str, username: str = "", password: str = "", existing_session_id: str = ""
+        ip: str, port: str, username: str = "", password: str = "", existing_session_id: str = "",
+        protocol: str = DEFAULT_DEVICE_PROTOCOL, tls_verify: bool = False,
     ):
+        """按 ip/port 拉取设备快照。
+
+        protocol：http/https（设备接入协议，缺省 http 保持老行为）；
+        tls_verify：https 下是否严格校验设备证书（缺省 False = 跳过，兼容自签证书）。
+        """
         channels: List[dict] = []
         device_tasks: List[dict] = []
         algorithms: set = set()
@@ -940,10 +989,10 @@ class DeviceService:
         agents: List[dict] = []
         status = "离线"
         session_id = existing_session_id
-        base_url = f"http://{ip}:{port}"
+        base_url = device_base_url(ip, port, protocol)
 
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with new_device_client(timeout=5.0, verify=bool(tls_verify)) as client:
                 if session_id:
                     client.cookies.set("sessionID", session_id)
 

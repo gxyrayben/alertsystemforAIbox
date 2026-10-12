@@ -60,8 +60,16 @@ Physical BOX devices use a **SHA256 challenge/response login** (`challenge_login
 
 Svelte 4 + Vite, Tailwind via CDN (no build-time Tailwind), Font Awesome icons.
 - **`src/lib/controlStore.js`** — central Svelte store: active tab (`activeMenu`), device list, selected device. Navigation is tab-based via `switchTab`, not a router.
-- **`src/lib/api.js`** — all HTTP goes through `apiGet/apiPost/apiPut/apiDelete` against `API_BASE` (`http://localhost:8000`). `apiPost` forwards an `AbortController` signal for cancelable requests (e.g. stopping a running task).
+- **`src/lib/api.js`** — all HTTP goes through `apiGet/apiPost/apiPut/apiDelete` against `API_BASE`, which now follows the page protocol (`${window.location.protocol}//${hostname}:8000`, overridable via `window.__API_BASE__`). `apiPost` forwards an `AbortController` signal for cancelable requests (e.g. stopping a running task).
 - **`src/App.svelte`** wires `TopNav` + a "基础配置" sidebar to the feature components (`Devices`, `Tasks`, `Alerts`, `Logs`, `Services`, `Network`, `LLMConfig`) and the AI features (`AIControl`, `TaskOps`, `Feedback`, `AgentLibrary`).
+
+## HTTPS / TLS
+
+Everything is HTTP by default; HTTPS is a **config switch**, not a code branch:
+
+- **服务端（入站）**：`backend/config.json` 的 `tls` 块（`enabled` / `cert_file` / `key_file`）是**唯一开关**，主服务 `:8000`（`main.py`）、报警接收 HTTP/WS（`alarm_services.py`）三处共用 —— 统一由 `database.tls_ssl_kwargs()` 判定（证书缺失只告警并回落 HTTP，不会让进程起不来）。前端「服务配置」页可改这个开关：报警接收端口保存即重启，主服务 `:8000` 需重启后端进程。
+- **设备侧（出站）**：每台设备自带 `protocol`（http/https，默认 http）与 `tls_verify`（默认 false = **跳过证书校验**，兼容 BOX 自签证书）。所有设备 URL 必须经 `DeviceService.base_url(device)` 拼接，所有设备 HTTP 客户端必须经 `DeviceService.new_client(device, timeout=...)` 创建（verify 策略在工厂里）——**不要在各处自建 `httpx.AsyncClient`**，否则 HTTPS 下自签证书会让调用全部失败。按 ip/port 走的 `fetch_device_data(..., protocol=, tls_verify=)` 同样要传这两个参数。调用公网 LLM 的 `llm_client.py` 不在此列（走系统 CA 校验）。
+- **证书**：在 `backend/` 下执行 `python tools/gen_self_signed_cert.py` 生成 `backend/certs/server.crt|key`（优先 openssl，缺则用 cryptography 库），已加入 `.gitignore`。前端 dev server 可选 HTTPS（避免混合内容）：`VITE_HTTPS=1 VITE_CERT=../backend/certs/server.crt VITE_KEY=../backend/certs/server.key npm run dev`。
 
 ## Conventions
 

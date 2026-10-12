@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, BigInteger
+from sqlalchemy import Column, String, BigInteger, Boolean
 from models.db import Base
 
 class DeviceORM(Base):
@@ -8,6 +8,10 @@ class DeviceORM(Base):
     name = Column(String, nullable=False)
     ip = Column(String, nullable=False)
     port = Column(String, nullable=False)
+    # 接入协议：http（默认）/ https。设备接口路径两种协议下一致，仅 scheme 不同。
+    protocol = Column(String, default="http")
+    # 是否严格校验设备证书：False（默认）跳过校验，兼容 BOX 常见自签证书；True 用系统 CA 严格校验。
+    tls_verify = Column(Boolean, default=False)
     username = Column(String, default="")
     password = Column(String, default="")
     status = Column(String, default="离线")

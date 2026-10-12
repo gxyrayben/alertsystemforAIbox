@@ -46,9 +46,12 @@ async def start_http_service():
     app.post(path, dependencies=dependencies)(receive_http_alarm)
     
     port = int(config.get("port", 80))
-    print(f"Starting dynamic HTTP service on port {port} at {path} (Auth: {config.get('auth_enabled')})...")
+    # TLS 开关（config.json 的 tls 块）：启用且证书齐备 → https，否则回落 http（见 database.tls_ssl_kwargs）
+    ssl_kwargs = database.tls_ssl_kwargs()
+    scheme = "https" if ssl_kwargs else "http"
+    print(f"Starting dynamic HTTP service on {scheme}://0.0.0.0:{port}{path} (Auth: {config.get('auth_enabled')})...")
     
-    uvicorn_config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn_config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info", **ssl_kwargs)
     http_server = uvicorn.Server(uvicorn_config)
     
     loop = asyncio.get_running_loop()
@@ -92,9 +95,12 @@ async def start_ws_service():
             pass
             
     port = int(config.get("port", 8080))
-    print(f"Starting dynamic WS service on port {port} at {path} (Auth: {config.get('auth_enabled')})...")
+    # WS 与 HTTP 共用同一份 TLS 开关：启用则 wss，否则 ws
+    ssl_kwargs = database.tls_ssl_kwargs()
+    scheme = "wss" if ssl_kwargs else "ws"
+    print(f"Starting dynamic WS service on {scheme}://0.0.0.0:{port}{path} (Auth: {config.get('auth_enabled')})...")
     
-    uvicorn_config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn_config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info", **ssl_kwargs)
     ws_server = uvicorn.Server(uvicorn_config)
     loop = asyncio.get_running_loop()
     ws_server_task = loop.create_task(ws_server.serve())

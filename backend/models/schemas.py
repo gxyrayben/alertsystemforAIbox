@@ -7,6 +7,10 @@ class Device(BaseModel):
     name: str
     ip: str
     port: str
+    # 接入协议：http（默认）/ https —— 设备接口路径两种协议一致，仅 scheme 不同
+    protocol: Optional[str] = "http"
+    # 是否严格校验设备证书：False（默认）跳过校验以兼容 BOX 自签证书；True 用系统 CA 严格校验
+    tls_verify: Optional[bool] = False
     username: Optional[str] = ""
     password: Optional[str] = ""
     status: Optional[str] = "离线"
@@ -230,9 +234,20 @@ class ServiceConfig(BaseModel):
     username: Optional[str] = ""
     password: Optional[str] = ""
 
+class TlsConfig(BaseModel):
+    """服务端 TLS（HTTPS/WSS）配置：主服务 :8000 与报警接收端口共用这一份开关。
+
+    enabled=False（默认）时全部服务仍走 HTTP/WS，与改造前行为一致；
+    enabled=True 时用 cert_file/key_file 启动 HTTPS/WSS（证书缺失会自动回落 HTTP 并在日志告警）。
+    """
+    enabled: bool = False
+    cert_file: str = "certs/server.crt"
+    key_file: str = "certs/server.key"
+
 class ServicesConfig(BaseModel):
     ws: ServiceConfig
     http: ServiceConfig
+    tls: Optional[TlsConfig] = None
 
 class NetworkConfigUpdate(BaseModel):
     backend_interface_id: str

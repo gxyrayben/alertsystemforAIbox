@@ -80,7 +80,7 @@ async def _apply_prompt_optimization(client, device, db, target_device_task,
     target_agent["agent_config"]["prompt"] = optimized_prompt
     update_payload = DeviceService.build_task_payload(target_device_task)
 
-    base_url = f"http://{device.ip}:{device.port}"
+    base_url = DeviceService.base_url(device)
     put_res = await client.put(f"{base_url}/intelli_manager/task", json=update_payload)
 
     ok = put_res.status_code == 200 and put_res.json().get("code") == 0
@@ -117,7 +117,7 @@ async def perform_auto_tune_workflow(db, task_obj, alert_limit=10):
         await db.commit()
         return False, "告警图片在磁盘上丢失"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with DeviceService.new_client(device, timeout=30.0) as client:
         tasks_data = await DeviceService.get_device_tasks(client, device, db)
         if not tasks_data:
             return False, "无法从设备获取任务列表"

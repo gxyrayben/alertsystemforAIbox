@@ -40,7 +40,10 @@ async def create_device(device: Device, db: AsyncSession = Depends(get_db)):
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail=f"设备业务 ID「{device.device_id}」已存在，请勿重复添加")
 
-    snapshot = await DeviceService.fetch_device_data(device.ip, device.port, device.username, device.password)
+    snapshot = await DeviceService.fetch_device_data(
+        device.ip, device.port, device.username, device.password,
+        protocol=device.protocol, tls_verify=bool(device.tls_verify),
+    )
 
     new_device = DeviceORM(id=f"dev-{uuid.uuid4()}", **device_data)
     apply_device_snapshot(new_device, *snapshot)
@@ -59,7 +62,8 @@ async def create_device(device: Device, db: AsyncSession = Depends(get_db)):
 async def manual_fetch_device(device_id: str, db: AsyncSession = Depends(get_db)):
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
     snapshot = await DeviceService.fetch_device_data(
-        device_obj.ip, device_obj.port, device_obj.username, device_obj.password, device_obj.session_id
+        device_obj.ip, device_obj.port, device_obj.username, device_obj.password, device_obj.session_id,
+        protocol=device_obj.protocol, tls_verify=bool(device_obj.tls_verify),
     )
     apply_device_snapshot(device_obj, *snapshot)
     await db.commit()
@@ -75,7 +79,8 @@ async def _resnapshot(device_obj: DeviceORM, db: AsyncSession) -> None:
     """
     try:
         snapshot = await DeviceService.fetch_device_data(
-            device_obj.ip, device_obj.port, device_obj.username, device_obj.password, device_obj.session_id
+            device_obj.ip, device_obj.port, device_obj.username, device_obj.password, device_obj.session_id,
+            protocol=device_obj.protocol, tls_verify=bool(device_obj.tls_verify),
         )
         apply_device_snapshot(device_obj, *snapshot)
         await db.commit()
@@ -85,7 +90,7 @@ async def _resnapshot(device_obj: DeviceORM, db: AsyncSession) -> None:
 
 async def _refresh_agents(device_obj: DeviceORM, db: AsyncSession) -> List[dict]:
     """实时从设备拉取智能体算法列表并持久化到 device.agents。设备离线/失败抛 HTTPException。"""
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         data = await DeviceService.list_agents(client, device_obj, db)
     if data is None:
         raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达")
@@ -123,7 +128,7 @@ async def list_device_algorithms(device_id: str, refresh: bool = Query(True), db
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
     rows, err = [], ""
     if refresh:
-        async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+        async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
             rows, err = await DeviceService.list_algorithm_rows(client, device_obj, db)
     fallback = False
     if not rows:  # 离线/未刷新 → 快照兜底，保证面板下拉不空
@@ -253,7 +258,7 @@ async def deploy_agent_task(device_id: str, payload: AgentTaskDeploy, db: AsyncS
     if not (1 <= len(payload.agents) <= 4):
         raise HTTPException(status_code=400, detail="智能体任务需关联 1~4 个智能体算法")
 
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         index = await _index_device_agents(client, device_obj, db)
         enriched = _enrich_agent_items(index, payload.agents)
 
@@ -281,7 +286,7 @@ async def deploy_smallmodel_task(device_id: str, payload: SmallModelTaskDeploy, 
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
     area = tb.roi_area(payload.roiPoints, payload.areaId or 1,
                        payload.areaName or "检测区", payload.areaType or "POLYGON")
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         ok, msg, task_id = await DeviceService.deploy_warehouse_task(
             client, device_obj, db,
             task_name=payload.task_name,
@@ -316,7 +321,7 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
     area = tb.roi_area(payload.roiPoints, payload.areaId or 1,
                        payload.areaName or "检测区", payload.areaType or "POLYGON")
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         data = await DeviceService.list_agents(client, device_obj, db)
         if data is None:
             raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达，无法下发任务")
@@ -384,7 +389,7 @@ async def deploy_warehouse_task(device_id: str, payload: WarehouseTaskDeploy, db
     if errors:
         raise HTTPException(status_code=400, detail="；".join(errors))
 
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         # ② 逐算法富化：解析 ROI（空=全画面）+ combined 的二次大模型 agent_llm（与编辑保存共用）
         enriched = await _enrich_warehouse_algorithms(client, device_obj, db, payload.algorithms)
 
@@ -413,7 +418,7 @@ async def update_agent_task(device_id: str, task_id: str, payload: AgentTaskDepl
     if not (1 <= len(payload.agents) <= 4):
         raise HTTPException(status_code=400, detail="智能体任务需关联 1~4 个智能体算法")
 
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         index = await _index_device_agents(client, device_obj, db)
         enriched = _enrich_agent_items(index, payload.agents)
         ok, msg = await DeviceService.update_agent_real_task(
@@ -444,7 +449,7 @@ async def update_warehouse_task(device_id: str, task_id: str, payload: Warehouse
     if errors:
         raise HTTPException(status_code=400, detail="；".join(errors))
 
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         enriched = await _enrich_warehouse_algorithms(client, device_obj, db, payload.algorithms)
         ok, msg = await DeviceService.update_warehouse_task_multi(
             client, device_obj, db,
@@ -464,7 +469,7 @@ async def set_device_task_enable(device_id: str, task_id: str, payload: TaskEnab
                                  db: AsyncSession = Depends(get_db)):
     """任务列表『是否启用』开关：切换设备任务 enable，并同步其名下各算法仓 monitor 的使能位。"""
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         ok, msg = await DeviceService.set_task_enable(
             client, device_obj, db, task_id=task_id, enable=payload.enable)
     if not ok:
@@ -480,7 +485,7 @@ async def create_device_agent(device_id: str, agent: AgentCreate, db: AsyncSessi
     body = tb.build_agent_item_payload(
         agent.event_id, agent.event_tag, agent.prompt, agent.alarm_type, agent.alarm_condition
     )
-    async with httpx.AsyncClient(timeout=_AGENT_TIMEOUT) as client:
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
         data = await DeviceService.create_agent(client, device_obj, db, body)
     if data is None:
         raise HTTPException(status_code=502, detail=f"设备「{device_obj.name}」离线或不可达，无法新建智能体算法")
@@ -496,11 +501,12 @@ async def update_device(device_id: str, updated_device: Device, db: AsyncSession
     device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
     update_data = updated_device.dict(exclude=_MANAGED_FIELDS)
 
-    # 连接关键参数变化时才重新拉取设备数据
-    connection_fields = ("ip", "port", "username", "password")
+    # 连接关键参数变化时才重新拉取设备数据（协议/证书校验同样属于连接参数）
+    connection_fields = ("ip", "port", "username", "password", "protocol", "tls_verify")
     if any(update_data.get(f) != getattr(device_obj, f) for f in connection_fields):
         snapshot = await DeviceService.fetch_device_data(
-            update_data.get("ip"), update_data.get("port"), update_data.get("username"), update_data.get("password")
+            update_data.get("ip"), update_data.get("port"), update_data.get("username"), update_data.get("password"),
+            protocol=update_data.get("protocol"), tls_verify=bool(update_data.get("tls_verify")),
         )
         apply_device_snapshot(device_obj, *snapshot)
 

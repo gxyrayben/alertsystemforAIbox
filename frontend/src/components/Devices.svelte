@@ -7,7 +7,7 @@
     let devices = [];
     let isDeviceModalOpen = false;
     let editingDeviceId = null;
-    let deviceFormData = { device_id: '', name: '', ip: '', port: '80', username: '', password: '' };
+    let deviceFormData = { device_id: '', name: '', ip: '', port: '80', protocol: 'http', tls_verify: false, username: '', password: '' };
     let devicePage = 1;
     const itemsPerPage = 15;
 
@@ -95,10 +95,11 @@
 
     function openDeviceModal(device = null) {
         if (device) {
-            deviceFormData = { ...device };
+            // 老快照可能没有 protocol/tls_verify 字段：补默认值，避免表单控件为空
+            deviceFormData = { protocol: 'http', tls_verify: false, ...device };
             editingDeviceId = device.id;
         } else {
-            deviceFormData = { device_id: '', name: '', ip: '', port: '80', username: '', password: '' };
+            deviceFormData = { device_id: '', name: '', ip: '', port: '80', protocol: 'http', tls_verify: false, username: '', password: '' };
             editingDeviceId = null;
         }
         isDeviceModalOpen = true;
@@ -145,7 +146,9 @@
                     <tr class="hover:bg-slate-900/60 transition-colors">
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-indigo-400">{device.device_id}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-100">{device.name}</td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-400 font-mono">{device.ip}:{device.port}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-400 font-mono">
+                            <span class="{device.protocol === 'https' ? 'text-emerald-400' : 'text-slate-500'}">{device.protocol || 'http'}://</span>{device.ip}:{device.port}
+                        </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm">
                             <span class="px-2.5 py-1 inline-flex text-xs leading-5 font-semibold rounded-full border {getStatusStyle(device.status)}">{device.status}</span>
                         </td>
@@ -199,6 +202,23 @@
                     <div class="w-32">
                         <label class="block text-sm font-medium text-slate-300 mb-1">端口</label>
                         <input type="text" placeholder="80" bind:value={deviceFormData.port} class="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-4 py-2 text-sm placeholder-slate-500 outline-none focus:border-indigo-500" />
+                    </div>
+                </div>
+                <!-- 接入协议：http/https（设备接口路径两种协议一致，仅 scheme 不同） -->
+                <div class="flex space-x-4">
+                    <div class="w-40">
+                        <label class="block text-sm font-medium text-slate-300 mb-1">接入协议</label>
+                        <select bind:value={deviceFormData.protocol} class="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500">
+                            <option value="http">http</option>
+                            <option value="https">https</option>
+                        </select>
+                    </div>
+                    <div class="flex-1 flex items-end pb-1.5">
+                        <label class="flex items-center gap-2 cursor-pointer {deviceFormData.protocol === 'https' ? '' : 'opacity-40 pointer-events-none'}">
+                            <input type="checkbox" bind:checked={deviceFormData.tls_verify} class="w-4 h-4 text-indigo-600 bg-slate-900 border-slate-700 rounded cursor-pointer" />
+                            <span class="text-xs text-slate-300">严格校验设备证书</span>
+                            <span class="text-[10px] text-slate-500">（默认跳过，兼容 BOX 自签证书）</span>
+                        </label>
                     </div>
                 </div>
                 <div>

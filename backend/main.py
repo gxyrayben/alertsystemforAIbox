@@ -65,6 +65,11 @@ async def lifespan(app: FastAPI):
             await conn.execute(text("ALTER TABLE devices ADD COLUMN agents TEXT DEFAULT '[]'"))
         if "algorithms_ability" not in dev_cols:
             await conn.execute(text("ALTER TABLE devices ADD COLUMN algorithms_ability TEXT DEFAULT '[]'"))
+        # 兼容旧库：devices 表补充接入协议与设备证书校验开关（HTTPS 支持）
+        if "protocol" not in dev_cols:
+            await conn.execute(text("ALTER TABLE devices ADD COLUMN protocol VARCHAR DEFAULT 'http'"))
+        if "tls_verify" not in dev_cols:
+            await conn.execute(text("ALTER TABLE devices ADD COLUMN tls_verify BOOLEAN DEFAULT 0"))
         # 兼容旧库：alerts 表补充告警反馈闭环所需列
         alert_cols = [row[1] for row in (await conn.execute(text("PRAGMA table_info(alerts)"))).fetchall()]
         _alert_migrations = {
@@ -135,4 +140,8 @@ app.include_router(task_templates.router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import database
+    # TLS 开关（config.json 的 tls 块）：启用且证书齐备时以 HTTPS 启动，否则回落 HTTP（详见 database.tls_ssl_kwargs）
+    _ssl_kwargs = database.tls_ssl_kwargs()
+    print(f"API 服务启动：{'https' if _ssl_kwargs else 'http'}://0.0.0.0:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000, **_ssl_kwargs)

@@ -293,7 +293,7 @@ async def run_optimization(db: AsyncSession, alert_ids: Optional[List[str]] = No
             await db.commit()
             continue
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with DeviceService.new_client(device, timeout=30.0) as client:
             tasks_data = await DeviceService.get_device_tasks(client, device, db)
             if not tasks_data:
                 _skip(db, batch_id, created_at, summary, dev_alerts, device_name, "设备离线或无法获取任务列表")
