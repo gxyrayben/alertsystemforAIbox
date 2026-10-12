@@ -542,6 +542,7 @@ class DeviceService:
         cooldown: int = 600,
         agent_llm: Optional[dict] = None,
         target_expand: Optional[dict] = None,
+        analysis_mode: Optional[str] = None,
         obj_count: Optional[int] = None,
     ) -> Tuple[bool, str, Optional[str]]:
         """算法仓任务两步下发的共享封装（纯小模型 & 小+大共用）。
@@ -549,7 +550,8 @@ class DeviceService:
         流程：create_task(single_point_task) → 取 data.task_id → create_monitor（带/不带 agent_llm）。
         返回 (成功?, 中文消息, task_id)。部分失败语义：任务已建但 monitor 失败时，
         返回 (False, 孤儿提示, task_id)，让调用方能把 task_id 回传便于排查/清理。
-        agent_llm 非空即『小+大』任务，target_expand 仅在该分支生效（见 build_monitor_payload）。
+        agent_llm 非空即『小+大』任务，target_expand / analysis_mode 仅在该分支生效：
+        二者随 agent_llm 一起写进 aiotapCustom.agentLLMParam【内】（见 build_monitor_payload）。
         obj_count 为人员数量，仅超员/少员算法生效（见 build_rule）。
         小模型/小+大为【实时分析】，无分析间隔/抽帧间隔概念（见 build_single_point_task_payload）。
         """
@@ -574,6 +576,7 @@ class DeviceService:
             target_max=target_max, target_min=target_min,
             duration=duration, cooldown=cooldown,
             agent_llm=agent_llm, target_expand=target_expand,
+            analysis_mode=analysis_mode,
             obj_count=obj_count,
         )
         mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
@@ -642,6 +645,8 @@ class DeviceService:
                     cooldown=algo.get("cooldown", 600),
                     agent_llm=algo.get("agent_llm"),
                     target_expand=algo.get("target_expand"),
+                    # 二次大模型分析模式（full_analysis / threshold）：随 agent_llm 写进 agentLLMParam
+                    analysis_mode=algo.get("analysis_mode"),
                     # 人数类算法(超员/少员)：人员数量 → extendParams.custom.<键>.objCount
                     obj_count=algo.get("obj_count"),
                 )
@@ -651,7 +656,7 @@ class DeviceService:
                 task_id, channel_device_id, cabin, rules,
                 version=group[0].get("version", "V2.0.0"), seq=seq,
             )
-            #print("下发 monitor payload:", json.dumps(monitor_payload))
+            print("下发 monitor payload:", json.dumps(monitor_payload))
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:
                 msg = (mon_res or {}).get("message") or "设备不可达或返回错误"
@@ -822,6 +827,8 @@ class DeviceService:
                     cooldown=algo.get("cooldown", 600),
                     agent_llm=algo.get("agent_llm"),
                     target_expand=algo.get("target_expand"),
+                    # 二次大模型分析模式（full_analysis / threshold）：随 agent_llm 写进 agentLLMParam
+                    analysis_mode=algo.get("analysis_mode"),
                     # 人数类算法(超员/少员)：人员数量 → extendParams.custom.<键>.objCount
                     obj_count=algo.get("obj_count"),
                 )
@@ -838,6 +845,7 @@ class DeviceService:
                 monitor_id=monitor_id,
                 monitor_name=old.get("monitor_name"),
             )
+            print("下发 修改 monitor payload:", json.dumps(monitor_payload))
             mon_res = await DeviceService.create_monitor(client, device, db, monitor_payload)
             if not mon_res or mon_res.get("code") != 0:
                 msg = (mon_res or {}).get("message") or "设备不可达或返回错误"

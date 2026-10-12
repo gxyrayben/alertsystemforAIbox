@@ -204,6 +204,7 @@ async def _enrich_warehouse_algorithms(
                     detail=f"设备上不存在智能体算法「{item.event_tag or item.agent_id}」，请先在『智能体资产库』新建。")
             alarm_type = item.alarm_type or dev_agent.get("alarm_type") or "freeform"
             is_attr = (alarm_type or "").lower() == "freeform"
+            print("f   item   ", json.dumps(item.dict()))
             agent_llm = tb.build_agent_llm_param(
                 {
                     **dev_agent,
@@ -231,6 +232,8 @@ async def _enrich_warehouse_algorithms(
             "cooldown": item.cooldown,
             "agent_llm": agent_llm,
             "target_expand": target_expand,
+            # 二次大模型分析模式（full_analysis / threshold）：随 agent_llm 一起写进 agentLLMParam
+            "analysis_mode": item.analysis_mode,
             # 人员数量：仅超员/少员算法有意义，由 build_rule 决定是否写入 extendParams.custom
             "obj_count": item.obj_count,
         })
@@ -356,6 +359,7 @@ async def deploy_combined_task(device_id: str, payload: CombinedTaskDeploy, db: 
             cooldown=payload.cooldown,
             agent_llm=agent_llm,
             target_expand=payload.target_expand,
+            analysis_mode=payload.analysis_mode,
             obj_count=payload.obj_count,
         )
     if not ok:

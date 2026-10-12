@@ -167,16 +167,42 @@ def index_agents(data: dict) -> dict:
     return index
 
 
+# ── 智能体预警条件(alarm_condition)取值 ────────────────────────────────────
+# 描述型(freeform) 恒为 none；判断型(yesno) 只有 only_yes / only_no / yes_and_no 三态。
+ALARM_CONDITION_NONE = "none"                 # 描述型：无是/否预警条件
+ALARM_CONDITION_ONLY_YES = "only_yes"         # 判断型：仅判定为「是」时报警
+ALARM_CONDITION_ONLY_NO = "only_no"           # 判断型：仅判定为「否」时报警
+ALARM_CONDITION_YES_AND_NO = "yes_and_no"     # 判断型：是 / 否都报警
+
+
+def normalize_alarm_condition(alarm_condition: Optional[str], alarm_type: Optional[str]) -> str:
+    """把预警条件规范成设备认可取值：描述型恒 none，判断型仅 only_yes / only_no / yes_and_no。
+
+    - 描述型(freeform)：恒为 none（描述型没有是/否判定，也就没有预警条件可选）；
+    - 判断型(yesno)：只勾「是」→ only_yes、只勾「否」→ only_no、两者都勾 → yes_and_no；
+      历史数据的 none 是【旧勾选框】语义（不勾=是/否都报警），故判断型上迁移为 yes_and_no；
+      缺省/未知取值一律按 only_yes（判断型默认）。
+    """
+    if (alarm_type or "").lower() != "yesno":
+        return ALARM_CONDITION_NONE
+    cond = (alarm_condition or "").strip().lower()
+    if cond == ALARM_CONDITION_ONLY_NO:
+        return ALARM_CONDITION_ONLY_NO
+    if cond in (ALARM_CONDITION_YES_AND_NO, ALARM_CONDITION_NONE):
+        return ALARM_CONDITION_YES_AND_NO
+    return ALARM_CONDITION_ONLY_YES
+
+
 def _default_alarm_condition(alarm_type: Optional[str]) -> str:
-    """按智能体报警类型给出默认报警条件：判断型(yesno)→only_yes，描述型(freeform)→none。"""
-    return "only_yes" if (alarm_type or "").lower() == "yesno" else "none"
+    """按智能体报警类型给出默认报警条件（口径见 normalize_alarm_condition）：判断型→only_yes，描述型→none。"""
+    return normalize_alarm_condition(None, alarm_type)
 
 
 def build_agent_config(agent: dict, area: Optional[dict] = None) -> dict:
     """由一个「已富化 agent 项」构造 agent_real_task 中单个 agent_list[i].agent_config。
 
     agent 可含：alarm_type / prompt / alarm_condition / filter_enable / filter_keywords。
-    - alarm_condition 缺省按 alarm_type 推导；
+    - alarm_condition 按 alarm_type 规范化（描述型恒 none；判断型 only_yes/only_no/yes_and_no）；
     - filter_enable 关闭时强制清空 filter_keywords（避免下发无意义的过滤词）；
     - areas 恒为单 ROI（缺省全画面），符合「每个智能体只关联一个检测区」。
     """
@@ -184,7 +210,8 @@ def build_agent_config(agent: dict, area: Optional[dict] = None) -> dict:
     filter_enable = bool(agent.get("filter_enable", False))
     return {
         "schedule_plan_id": "1",
-        "alarm_condition": agent.get("alarm_condition") or _default_alarm_condition(agent.get("alarm_type")),
+        "alarm_condition": normalize_alarm_condition(
+            agent.get("alarm_condition"), agent.get("alarm_type")),
         "prompt": agent.get("prompt", "") or "",
         "filter_enable": filter_enable,
         "filter_keywords": (agent.get("filter_keywords") or "") if filter_enable else "",
@@ -243,7 +270,7 @@ def build_agent_task_payload(
         "event_tag": agent.get("event_tag"),
         "alarm_type": agent.get("alarm_type"),
         "prompt": prompt if prompt is not None else agent.get("prompt", ""),
-        "alarm_condition": alarm_condition or _default_alarm_condition(agent.get("alarm_type")),
+        "alarm_condition": normalize_alarm_condition(alarm_condition, agent.get("alarm_type")),
         "filter_enable": False,
         "filter_keywords": "",
         "area": area or full_frame_area(),
@@ -355,6 +382,15 @@ def rule_obj_count(extend_params: Optional[dict], event_type: Optional[str] = No
     return None
 
 
+# ── 『小+大』规则的二次大模型分析模式（设备侧 agentLLMParam.analysis_mode）──────────
+# 设备真实 payload 里 analysis_mode 与扩图/目标阈值一样，都挂在 agentLLMParam【内】。
+# 未指定或设备回读值异常时一律回落 full_analysis，保持与既往下发行为一致。
+ANALYSIS_MODE_FULL = "full_analysis"
+ANALYSIS_MODE_THRESHOLD = "threshold"
+# 扩图策略缺省值（沿用历史默认，仅字段位置从 extendParams 顶层搬进 agentLLMParam，数值口径不变）
+DEFAULT_TARGET_EXPAND = {"left": 0.4, "top": 0.5, "right": 0.6, "bottom": 0.3}
+
+
 def build_rule(
     event_type: str,
     area: Optional[dict] = None,
@@ -366,6 +402,7 @@ def build_rule(
     cooldown: int = 600,
     agent_llm: Optional[dict] = None,
     target_expand: Optional[dict] = None,
+    analysis_mode: Optional[str] = None,
     rule_id: int = 1,
     obj_count=None,
     custom: Optional[dict] = None,
@@ -374,8 +411,9 @@ def build_rule(
 
     一个算法的唯一身份 = (算法仓 algoCabinName, eventType)：同一算法仓内可挂多条规则，
     每条对应一个 eventType；build_warehouse_monitor 会把多条规则组装进同一条 monitor。
-    agent_llm 非空时该规则为『小+大』：挂 aiotapCustom.agentLLMParam、切 full_analysis、
-    带扩图 target_expand（缺省对称默认值）。ruleId 由 build_warehouse_monitor 统一重排为 1..N，
+    agent_llm 非空时该规则为『小+大』：挂 aiotapCustom.agentLLMParam，并把 analysis_mode /
+    target_expand / target_thresholds 三个字段放进 agentLLMParam【内】（设备真实格式，见下方注释）。
+    ruleId 由 build_warehouse_monitor 统一重排为 1..N，
     ruleCustomName 同样由其统一赋为 str(monitor_id)（本函数只产出与 monitor 无关的字段）。
     threshold 入参为【标量】，下发时按设备格式包成 {eventType: 值}（传字典则原样透传）。
     target_max/target_min 为【目标大小】，设备口径 0~1 两位小数（面板 0~100 由 target_size 折算）。
@@ -384,13 +422,15 @@ def build_rule(
     """
     area = round_area(area) or full_frame_area()
     target_types = target_types or ["PERSON"]
+    # 设备侧 threshold 是按事件类型分别配置的字典（一条规则一个 eventType，故只有一项）；
+    # 『小+大』的 agentLLMParam.target_thresholds 与它【同源】：同一份阈值在规则里出现两处。
+    threshold_dict = threshold if isinstance(threshold, dict) else {event_type: threshold}
     extend_params = {
         "targetMax": target_size(target_max, 1),
         "targetMin": target_size(target_min, 0),
         "duration": duration,
         "cooldownDuration": cooldown,
-        # 设备侧 threshold 是按事件类型分别配置的字典（一条规则一个 eventType，故只有一项）
-        "threshold": threshold if isinstance(threshold, dict) else {event_type: threshold},
+        "threshold": threshold_dict,
         "targetTypes": target_types,
         "level": "ALARM_LEVEL",
     }
@@ -404,9 +444,14 @@ def build_rule(
     if merged_custom:
         extend_params["custom"] = merged_custom
     if agent_llm:
-        extend_params["aiotapCustom"] = {"agentLLMParam": agent_llm} ### 这里不对 gxyrayben
-        extend_params["analysis_mode"] = "full_analysis"
-        extend_params["target_expand"] = target_expand or {"left": 0.4, "top": 0.5, "right": 0.6, "bottom": 0.3}
+        # 设备真实格式：analysis_mode / target_expand / target_thresholds 三者都在 agentLLMParam【内】，
+        # 不在 extendParams 顶层（旧实现挂错了层级，设备侧读不到 → 分析模式与扩图参数实际失效）。
+        llm = dict(agent_llm)
+        llm["analysis_mode"] = analysis_mode or llm.get("analysis_mode") or ANALYSIS_MODE_FULL
+        # 扩图策略优先级：显式入参 > 已有 agentLLMParam 里的值（改任务/自动调优重下时保住用户配置）> 历史默认值
+        llm["target_expand"] = target_expand or llm.get("target_expand") or dict(DEFAULT_TARGET_EXPAND)
+        llm["target_thresholds"] = dict(threshold_dict)
+        extend_params["aiotapCustom"] = {"agentLLMParam": llm}
     return {
         "areas": [area],
         "masks": [],
@@ -543,15 +588,16 @@ def build_monitor_payload(
     cooldown: int = 600,
     agent_llm: Optional[dict] = None,
     target_expand: Optional[dict] = None,
+    analysis_mode: Optional[str] = None,
     seq: int = 1,
     obj_count=None,
     custom: Optional[dict] = None,
 ) -> dict:
     """算法仓任务第二步 monitor（【单算法】便捷入口，委托到 build_rule + build_warehouse_monitor）。
 
-    agent_llm 非空时挂载 aiotapCustom.agentLLMParam 并切换 analysis_mode=full_analysis，
-    即『小+大』任务；为空则是『纯小模型』任务。
-    target_expand 为『小+大』任务的扩图策略（缺省对称默认值），仅在 agent_llm 非空分支内生效。
+    agent_llm 非空时挂载 aiotapCustom.agentLLMParam 即『小+大』任务；为空则是『纯小模型』任务。
+    analysis_mode / target_expand 为『小+大』的分析模式与扩图策略，二者随 agent_llm 一起写进
+    agentLLMParam【内】（缺省 full_analysis / 历史默认扩图），仅在该分支生效。
     obj_count/custom 透传给 build_rule（超员/少员的人员数量，详见该函数）。
     monitor_id 缺省由 (task_id, seq) 派生（单算法即单仓，故 seq 默认 1 → task_id*100+1）。
     需要在同一算法仓挂多条算法、或跨仓增删改时，请直接用 build_rule + build_warehouse_monitor。
@@ -567,6 +613,7 @@ def build_monitor_payload(
         cooldown=cooldown,
         agent_llm=agent_llm,
         target_expand=target_expand,
+        analysis_mode=analysis_mode,
         obj_count=obj_count,
         custom=custom,
     )
@@ -588,6 +635,9 @@ def build_agent_llm_param(agent: dict, prompt: Optional[str] = None,
 
     agent 可含 filter_enable / filter_keywords（仅描述型 freeform 有意义），语义与
     build_agent_config 一致：关闭过滤时强制清空关键词，避免下发无意义的过滤词。
+    alarm_condition 按 alarm_type 规范化（描述型恒 none；判断型 only_yes/only_no/yes_and_no）。
+    注意：analysis_mode / target_expand / target_thresholds 不在本函数产出——它们依赖『规则』本身
+    （阈值、扩图、分析模式），由 build_rule 在组装规则时补进同一份 agentLLMParam（设备真实格式）。
     """
     filter_enable = bool(agent.get("filter_enable", False))
     return {
@@ -595,7 +645,7 @@ def build_agent_llm_param(agent: dict, prompt: Optional[str] = None,
         "event_tag": agent.get("event_tag"),
         "alarm_type": agent.get("alarm_type", "freeform"),
         "prompt": prompt if prompt is not None else agent.get("prompt", ""),
-        "alarm_condition": alarm_condition or _default_alarm_condition(agent.get("alarm_type")),
+        "alarm_condition": normalize_alarm_condition(alarm_condition, agent.get("alarm_type")),
         "filter": "",
         "filter_enable": filter_enable,
         "filter_keywords": (agent.get("filter_keywords") or "") if filter_enable else "",
@@ -783,8 +833,10 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
     if _obj_count is not None:
         cfg["objCount"] = _obj_count
 
-    # 扩图区域仅『小+大』任务的 monitor 才有 target_expand
-    expand = ep.get("target_expand") or {}
+    # 扩图区域/分析模式仅『小+大』规则的 agentLLMParam 才有（设备真实格式在 agentLLMParam 内）；
+    # 兼容早期挂错层级的旧数据：顶层 extendParams.target_expand 读得到也带回，避免查看旧任务丢配置。
+    llm_ep = (ep.get("aiotapCustom") or {}).get("agentLLMParam") or {}
+    expand = llm_ep.get("target_expand") or ep.get("target_expand") or {}
     if expand:
         if "top" in expand:
             cfg["cropUp"] = expand.get("top")
@@ -794,6 +846,8 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
             cfg["cropLeft"] = expand.get("left")
         if "right" in expand:
             cfg["cropRight"] = expand.get("right")
+    if llm_ep.get("analysis_mode"):
+        cfg["analysisMode"] = llm_ep.get("analysis_mode")
 
     return cfg
 
@@ -849,8 +903,9 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
     if _obj_count is not None:
         item["objCount"] = _obj_count
 
-    # 扩图区域仅『小+大』规则才有 target_expand
-    expand = ep.get("target_expand") or {}
+    # 扩图区域/分析模式仅『小+大』规则才有：设备真实格式在 agentLLMParam 内；
+    # 兼容早期挂错层级的旧数据（顶层 extendParams.target_expand / analysis_mode 读得到也带回）。
+    expand = agent_llm.get("target_expand") or ep.get("target_expand") or {}
     if expand:
         if "top" in expand:
             item["cropUp"] = expand.get("top")
@@ -860,6 +915,9 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
             item["cropLeft"] = expand.get("left")
         if "right" in expand:
             item["cropRight"] = expand.get("right")
+    analysis_mode = agent_llm.get("analysis_mode") or ep.get("analysis_mode")
+    if analysis_mode:
+        item["analysisMode"] = analysis_mode
 
     # 『小+大』规则的二次大模型参数（面板第③步「级联后置多模态 Agent」展示的全量字段）
     if agent_llm.get("event_id"):
@@ -956,5 +1014,5 @@ def build_agent_item_payload(event_id: str, event_tag: str, prompt: str,
         "agent_name": event_tag,
         "prompt": prompt,
         "alarm_type": alarm_type,
-        "alarm_condition": alarm_condition or _default_alarm_condition(alarm_type),
+        "alarm_condition": normalize_alarm_condition(alarm_condition, alarm_type),
     }

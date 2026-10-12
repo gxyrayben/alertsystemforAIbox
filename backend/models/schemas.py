@@ -83,9 +83,12 @@ class CombinedTaskDeploy(SmallModelTaskDeploy):
     """小+大任务下发请求体：在纯小模型基础上追加二次大模型（agentLLMParam）与扩图策略。
 
     target_expand：扩图策略 {top,bottom,left,right}（仅小+大生效）；
+    analysis_mode：二次大模型分析模式 full_analysis（默认）/ threshold（仅小+大生效）；
     agent_id 必填，其余智能体字段缺省沿用设备端该智能体自身配置。
     """
     target_expand: Optional[dict] = None
+    # 二次大模型分析模式：full_analysis（默认）/ threshold；与 target_expand 一起写进 agentLLMParam
+    analysis_mode: Optional[str] = None
     agent_id: str
     event_tag: str = ""
     alarm_type: str = "freeform"
@@ -131,6 +134,9 @@ class WarehouseAlgorithmItem(BaseModel):
     filter_enable: bool = False
     filter_keywords: str = ""
     target_expand: Optional[dict] = None
+    # 二次大模型分析模式：full_analysis（默认，全量分析）/ threshold（按阈值模式分析）；
+    # 与 target_expand、target_thresholds 一起写进 aiotapCustom.agentLLMParam（设备真实格式）
+    analysis_mode: Optional[str] = None
 
 class WarehouseTaskDeploy(BaseModel):
     """算法仓任务【多算法】统一下发请求体（纯小模型 / 小+大 / 二者混合，一次提交多条算法）。

@@ -324,6 +324,10 @@ def _rule_from_existing(rule: dict, args: dict) -> dict:
         cooldown=args.get("cooldown", ep.get("cooldownDuration", 600)),
         agent_llm=agent_llm,
         target_expand=args.get("target_expand") or ep.get("target_expand"),
+        # 分析模式：显式入参 > 设备上已有的 agentLLMParam.analysis_mode（未给就沿用，避免改别的字段时被重置）
+        analysis_mode=args.get("analysis_mode")
+        or (orig_agent_llm or {}).get("analysis_mode")
+        or ep.get("analysis_mode"),
         # 人数类算法：未显式改人数时沿用设备上的 objCount；custom 整体透传，避免抹掉其他子键
         obj_count=args.get("obj_count"),
         custom=ep.get("custom"),
@@ -474,6 +478,7 @@ TOOLS = [
                 "target_types":    {"type": "array", "items": {"type": "string"}, "description": "检测目标类型，如 [PERSON]"},
                 "roiPoints":       {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]"},
                 "target_expand":   {"type": "object", "description": "扩图策略{top,bottom,left,right}（仅小+大生效）"},
+                "analysis_mode":   {"type": "string", "enum": ["full_analysis", "threshold"], "description": "二次大模型分析模式（仅小+大生效）：full_analysis=全量分析（默认）/ threshold=按阈值模式分析；不传则沿用设备上已有值"},
                 "obj_count":       {"type": "integer", "description": "人员数量 0~100，仅超员(PERSON_OVER_QUERYING)/少员(PERSON_LESS_QUERYING)算法生效：超员=画面人数超过该值报警，少员=少于该值报警"},
                 "prompt":          {"type": "string", "description": "覆盖二次大模型提示词（仅小+大生效）"},
             },
@@ -504,6 +509,7 @@ TOOLS = [
                 "cooldown":        {"type": "integer", "description": "报警间隔/冷却时长(秒)，默认600"},
                 "roiPoints":       {"type": "array", "items": {"type": "object"}, "description": "ROI检测区归一化多边形点[{x,y}]，为空则全画面"},
                 "target_expand":   {"type": "object", "description": "扩图策略{top,bottom,left,right}（仅小+大生效）"},
+                "analysis_mode":   {"type": "string", "enum": ["full_analysis", "threshold"], "description": "二次大模型分析模式（仅小+大生效）：full_analysis=全量分析（默认）/ threshold=按阈值模式分析"},
                 "obj_count":       {"type": "integer", "description": "人员数量 0~100，仅超员(PERSON_OVER_QUERYING)/少员(PERSON_LESS_QUERYING)算法生效：超员=画面人数超过该值报警，少员=少于该值报警；不传默认2"},
                 "prompt":          {"type": "string", "description": "二次大模型/智能体提示词（小+大或纯大模型）"},
                 "filter_enable":   {"type": "boolean", "description": "纯大模型描述型智能体：是否启用关键词过滤"},
@@ -965,6 +971,8 @@ async def _add_task_algorithm(args: dict, db: AsyncSession) -> str:
             target_max=args.get("target_max", 1), target_min=args.get("target_min", 0),
             duration=args.get("duration", 3), cooldown=args.get("cooldown", 600),
             agent_llm=agent_llm, target_expand=args.get("target_expand"),
+            # 二次大模型分析模式（仅小+大生效）：full_analysis（默认）/ threshold
+            analysis_mode=args.get("analysis_mode"),
             obj_count=args.get("obj_count"))
 
         # 读取任务全部 monitor，判断目标仓是否已存在

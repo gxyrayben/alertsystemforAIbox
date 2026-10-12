@@ -47,6 +47,8 @@
         event_type: '', algo_cabin_name: '',    // 算法标识（propose/对话填充；查看态无来源，靠 deploy() guard 拦截）
         // 智能体任务（agent_real_task）专用：
         taskMode: 'smallmodel',   // 'agent' | 'smallmodel' | 'combined'
+        // 小+大『二次大模型分析模式』(agentLLMParam.analysis_mode)：full_analysis=全量分析（设备默认）/ threshold=阈值模式
+        analysisMode: 'full_analysis',
         task_id: null,            // 非空=正在编辑设备上的既有任务（保存走 PUT 真更新）；null=新建下发
         channel_device_id: null,
         device_id: null,
@@ -143,13 +145,22 @@
     $: activeAgent = (config.agents || [])[config.activeAgentIndex] || null;
     // 算法仓任务的当前编辑算法项（与 activeAgent 镜像，仅第③步详情参数使用）
     $: activeAlgorithm = (config.algorithms || [])[config.activeAlgorithmIndex] || null;
+    // 解析一个智能体槽位/算法项的报警类型（描述型 freeform / 判断型 yesno）：
+    // 设备不回传 alarm_type（查看既有任务）时按 event_id（算法项用 agent_id）到设备智能体目录反查；
+    // 都拿不到时返回 ''，由调用方交给后端按设备侧智能体类型规范化——绝不猜值。
+    function resolveAgentAlarmType(agent) {
+        if (!agent) return '';
+        const direct = agent.alarm_type || agent.alarmType;
+        if (direct) return direct;
+        const key = agent.event_id || agent.agent_id;
+        const hit = availableAgents.find((a) => String(a.event_id) === String(key));
+        return hit?.alarm_type || '';
+    }
     // 当前智能体的报警类型（描述型 freeform / 判断型 yesno）：查看设备既有大模型任务时，
     // task_list 不回传 alarm_type，故按 event_id 到设备智能体目录(availableAgents)反查，
     // 否则描述型会被误按判断型渲染（第③步的两套配置项就串了）。
     // 目录也查不到时兜底 freeform，与后端 _enrich_agent_items / _agent_task_panel 的兜底口径一致。
-    $: activeAgentAlarmType = activeAgent?.alarm_type
-        || availableAgents.find((a) => String(a.event_id) === String(activeAgent?.event_id))?.alarm_type
-        || 'freeform';
+    $: activeAgentAlarmType = resolveAgentAlarmType(activeAgent) || 'freeform';
     // 第②步的绘制对象是【检测区本身】，与当前算法/智能体无关：画完再在对应关系表里勾选关联项
     $: drawingRoi = (config.rois || []).find((r) => r.id === drawingRoiId) || null;
     // 绘制目标被删除 / 换任务重载配置后不在池中：复位为「待新建」，避免画布指向幽灵区域
@@ -472,23 +483,36 @@
     }
 
     // ── 判断型(yesno)智能体的「预警条件」：支持同时勾选「是」与「否」────────────────
-    // 设备侧 alarm_condition 三态与勾选组合的对应：
-    //   仅勾「是」→ only_yes；仅勾「否」→ only_no；两项都勾 → none（是/否都报警）。
+    // 设备侧 alarm_condition 与勾选组合的对应：
+    //   仅勾「是」→ only_yes；仅勾「否」→ only_no；两项都勾 → yes_and_no（是/否都报警）。
+    // 描述型(freeform) 恒为 none（描述型没有是/否判定），见 alarmConditionForDeploy。
     // 设备无「都不报警」语义，故两项都不勾非法（下方处理函数会还原勾选态并提示）。
-    // 缺省/未知值（含查看旧任务时设备不回传 alarm_type/alarm_condition）按判断型默认 only_yes 解析，
-    // 与后端 _default_alarm_condition 的推导保持一致。
+    // 缺省/未知值按判断型默认 only_yes 解析，与后端 normalize_alarm_condition 的推导保持一致。
     function alarmConditionFlags(cond) {
         const c = String(cond || 'only_yes').toLowerCase();
         if (c === 'only_no') return { yes: false, no: true };
-        if (c === 'none') return { yes: true, no: true };
+        // yes_and_no = 是/否都报警；旧数据的 none（老勾选框语义「不勾=是/否都上报」）同样按两项都勾展示，
+        // 用户下次改动或下发时会被规范化成 yes_and_no（见 alarmConditionForDeploy）。
+        if (c === 'yes_and_no' || c === 'none') return { yes: true, no: true };
         return { yes: true, no: false };   // only_yes / 缺省 / 未知值
     }
     // 由勾选态反推 alarm_condition；返回 '' 表示非法组合（两项都不勾）
     function alarmConditionFromFlags(yes, no) {
-        if (yes && no) return 'none';
+        if (yes && no) return 'yes_and_no';
         if (yes) return 'only_yes';
         if (no) return 'only_no';
         return '';
+    }
+    // 下发给设备的规范值：描述型恒 none；判断型仅 only_yes / only_no / yes_and_no
+    //（旧数据的 none 在判断型上是老「是/否都报警」语义 → 迁移为 yes_and_no；缺省/未知按 only_yes）。
+    // alarmType 为空（类型未知）时原样透传，交后端按设备侧智能体类型规范化，避免把判断型误判成描述型。
+    function alarmConditionForDeploy(cond, alarmType) {
+        if (!alarmType) return cond || null;
+        if (alarmType !== 'yesno') return 'none';
+        const c = String(cond || '').toLowerCase();
+        if (c === 'only_no') return 'only_no';
+        if (c === 'yes_and_no' || c === 'none') return 'yes_and_no';
+        return 'only_yes';
     }
     // 当前预警条件的中文说明（面板回显）
     function alarmConditionLabel(cond) {
@@ -496,7 +520,7 @@
         const c = alarmConditionFromFlags(f.yes, f.no);
         return c === 'only_yes' ? 'only_yes —— 仅判定为「是」时报警'
             : c === 'only_no' ? 'only_no —— 仅判定为「否」时报警'
-            : 'none —— 判定为「是」或「否」都报警';
+            : 'yes_and_no —— 判定为「是」或「否」都报警';
     }
     // 勾选/取消一项预警条件：两项都不勾时把 DOM 勾选态还原，保证至少保留一项
     function toggleAgentAlarmCondition(kind, checked, ev) {
@@ -527,15 +551,10 @@
         setAlgoAgentField(i, 'alarm_condition', cond);
     }
 
-    // 小+大协同：切换二次大模型的报警类型时，一并复位类型专属条件
-    // （判断型走 alarm_condition、描述型走 filter_*，两者互不通用），避免上一个类型的值残留；
-    // 复位为 null 后由后端 _default_alarm_condition 按新类型推导（yesno→only_yes / freeform→none），
-    // 与智能体任务 changeAgent「换智能体即改用新智能体自身条件」的口径一致。
-    function changeAlgoAlarmType(i, value) {
-        config.algorithms = config.algorithms.map((a, idx) => idx === i ? {
-            ...a, alarm_type: value, alarm_condition: null, filter_enable: false, filter_keywords: ''
-        } : a);
-    }
+    // 小+大协同：二次大模型的报警类型恒由【所选智能体自身】决定（面板不再提供 alarm_type 下拉，
+    // 与纯大模型任务一致：类型来自设备智能体目录，不由用户手改）。故按 agent_id 到目录反查兜底，
+    // 目录也查不到时按 freeform，与后端 _enrich_warehouse_algorithms / normalize_alarm_condition 口径一致。
+    $: activeAlgoAgentAlarmType = resolveAgentAlarmType(activeAlgorithm) || 'freeform';
 
     // ── 「字符匹配」（描述型条件判断的关键词 filter_keywords）：仅接受英文与数字 ──
     // 用户只能输入英文/数字，中文、空格、标点等非法字符在输入瞬间被剔除，不落入 config、也不下发给设备。
@@ -665,6 +684,8 @@
             item.agent_id = ''; item.agentType = ''; item.event_tag = '';
             item.alarm_type = 'freeform'; item.prompt = ''; item.alarm_condition = null;
             item.filter_enable = false; item.filter_keywords = '';
+            // 二次大模型分析模式：默认全量分析（与设备既往下发行为一致）
+            item.analysisMode = defaultConfig.analysisMode;
         }
         config.algorithms = [...config.algorithms, item];
         config.activeAlgorithmIndex = config.algorithms.length - 1;
@@ -694,18 +715,56 @@
     // 换智能体即改用新智能体自身的报警条件（设备未给则置 null 交后端按 alarm_type 推导），并复位关键词过滤
     function changeAlgoAgent(i, eventId) {
         const src = availableAgents.find((a) => String(a.event_id) === String(eventId)) || {};
+        const agentPrompt = src.prompt || '';   // 智能体自带的 Prompt（设备目录 live 值）
         config.algorithms = config.algorithms.map((a, idx) => idx === i ? {
             ...a, agent_id: eventId, agentType: eventId, event_tag: src.event_tag || String(eventId),
-            alarm_type: src.alarm_type || 'freeform', prompt: src.prompt || a.prompt || '',
+            alarm_type: src.alarm_type || 'freeform',
+            // 选中智能体即用其自带 Prompt 预填（目录里没有才保留原值），用户可在输入框继续微调
+            prompt: agentPrompt || a.prompt || '',
             alarm_condition: src.alarm_condition || null,
             filter_enable: false, filter_keywords: ''
         } : a);
-        if (i === (config.activeAlgorithmIndex || 0)) config.agentType = eventId;
+        // 第③步的「智能体大模型视觉推理 Prompt 策略」输入框绑的是顶层 config.prompt（多算法面板的
+        // 当前项镜像），故改的若是当前项，必须一并同步顶层：否则框里仍显示旧值，且 deployWarehouseTaskMulti
+        // 读 p.prompt（激活项取顶层 config）会把旧值下发，selectAlgorithm 的 writeBackActiveAlgorithm
+        // 还会把旧值写回算法项、覆盖掉刚取到的智能体 Prompt。
+        if (i === (config.activeAlgorithmIndex || 0)) {
+            config.agentType = eventId;
+            config.prompt = agentPrompt || config.prompt || '';
+        }
     }
 
     // combined 算法项：就地修改二次大模型的某个参数（第③步「级联后置多模态 Agent」全量参数编辑）
     function setAlgoAgentField(i, key, value) {
         config.algorithms = config.algorithms.map((a, idx) => idx === i ? { ...a, [key]: value } : a);
+    }
+
+    // 小+大「分析模式」(analysis_mode) 逐项写回 + 同步顶层：下拉绑顶层 config.analysisMode
+    //（多算法面板的当前项镜像），下发时激活项读顶层、其余项读各自 item，故两处必须一致。
+    function changeAlgoAnalysisMode(i, value) {
+        setAlgoAgentField(i, 'analysisMode', value);
+        if (i === (config.activeAlgorithmIndex || 0)) config.analysisMode = value;
+    }
+
+    // 「恢复智能体默认 Prompt」：把当前算法项所选智能体在设备目录里的 Prompt 重新拉回输入框。
+    // 选中智能体时已自动回填，此按钮供用户手改后一键还原（当前项同时同步顶层 config.prompt + 算法项）。
+    function restoreAlgoAgentPrompt() {
+        const i = config.activeAlgorithmIndex || 0;
+        const item = (config.algorithms || [])[i];
+        if (!item) return;
+        const agentId = item.agent_id || config.agentType || '';
+        const src = availableAgents.find((a) => String(a.event_id) === String(agentId));
+        if (!src) {
+            showToast('未取到该智能体的目录信息（设备离线或尚未选择智能体），无法恢复默认 Prompt。', 'warning');
+            return;
+        }
+        if (!src.prompt) {
+            showToast(`智能体「${src.event_tag || agentId}」在设备上没有配置 Prompt，无可恢复内容。`, 'warning');
+            return;
+        }
+        setAlgoAgentField(i, 'prompt', src.prompt);
+        if (i === (config.activeAlgorithmIndex || 0)) config.prompt = src.prompt;
+        showToast(`已恢复智能体「${src.event_tag || agentId}」自带的 Prompt。`, 'success');
     }
 
     // ── ROI 池：改名 / 改区域号 / 删除（删除后引用它的算法/智能体回落全屏；全屏项为默认不可删/改） ──
@@ -857,7 +916,7 @@
     // 使单算法面板显示/编辑的是「当前算法」的真实值（下发时当前项也回读顶层，保持一致）。
     const PANEL_PARAM_KEYS = ['maxTarget', 'minTarget', 'yoloHumanThresh', 'yoloVehicleThresh',
         'yoloNonMotorThresh', 'yoloTarget', 'yoloTargets', 'intrusionDuration', 'alarmInterval',
-        'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'objCount', 'prompt', 'agentType'];
+        'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'objCount', 'prompt', 'agentType', 'analysisMode'];
     function hoistItemParams(item) {
         const out = {};
         for (const k of PANEL_PARAM_KEYS) if (item && item[k] !== undefined) out[k] = item[k];
@@ -909,6 +968,8 @@
             item.alarm_condition = d.alarm_condition ?? null;
             item.filter_enable = !!d.filter_enable;
             item.filter_keywords = d.filter_keywords || '';
+            // 分析模式：旧快照/模板可能没有，缺省全量分析
+            item.analysisMode = d.analysisMode || defaultConfig.analysisMode;
         }
         return {
             ...base, ...d,
@@ -1194,17 +1255,18 @@
             // 人数类算法(超员/少员)：额外下发人员数量，后端据 event_type 写入 extendParams.custom.<键>.objCount
             if (personCountMeta(algo.event_type)) algo.obj_count = clampObjCount(p.objCount ?? defaultConfig.objCount);
             if (kind === 'combined') {
-                // 小+大：追加扩图策略（target_expand 仅小+大生效）+ 二次大模型全量参数
+                // 小+大：追加扩图策略 + 分析模式（二者仅小+大生效，后端把它们写进 agentLLMParam 内）+ 二次大模型全量参数
                 algo.target_expand = {
                     top: Number(p.cropUp), bottom: Number(p.cropDown),
                     left: Number(p.cropLeft), right: Number(p.cropRight)
                 };
+                algo.analysis_mode = p.analysisMode || item.analysisMode || defaultConfig.analysisMode;
                 algo.agent_id = p.agentType || item.agent_id;
                 // event_tag/alarm_type/alarm_condition/filter_* 不在顶层面板键里，恒读各自 item（第③步就地编辑）
                 algo.event_tag = item.event_tag || '';
                 algo.alarm_type = item.alarm_type || 'freeform';
                 algo.prompt = p.prompt || '';
-                algo.alarm_condition = item.alarm_condition || null;
+                algo.alarm_condition = alarmConditionForDeploy(item.alarm_condition, resolveAgentAlarmType(item));
                 // 关键词过滤仅描述型(freeform)有意义，判断型强制关闭（与 deployAgentTask/后端 _enrich_* 一致）
                 const freeform = (item.alarm_type || 'freeform') === 'freeform';
                 algo.filter_enable = freeform && !!item.filter_enable;
@@ -1269,7 +1331,7 @@
                     event_tag: a.event_tag || '',
                     alarm_type: a.alarm_type || 'freeform',
                     prompt: a.prompt || '',
-                    alarm_condition: a.alarm_condition || null,
+                    alarm_condition: alarmConditionForDeploy(a.alarm_condition, resolveAgentAlarmType(a)),
                     filter_enable: a.alarm_type === 'freeform' ? !!a.filter_enable : false,
                     filter_keywords: a.alarm_type === 'freeform' ? (a.filter_keywords || '') : '',
                     roiPoints: ((a.roiId || 'full') === 'full') ? [] : (roi.points || []),
@@ -2153,10 +2215,9 @@
                                         {/if}
                                     </div>
                                 {:else}
-                                    <!-- 判断型(yesno)智能体：预警条件 alarm_condition —— 勾选=仅「是」报警(only_yes)、仅「否」报警(only_no)、两者都报警(none)。
-                                         缺省(null)时（含查看旧任务时设备不回传）按判断型默认 only_yes 解析，与后端 _default_alarm_condition 一致。
-                                         预警条件支持同时勾选「是」与「否」：仅勾是→only_yes / 仅勾否→only_no / 都勾→none（是/否都报警）；
-                                         两项都不勾非法，toggleAgentAlarmCondition 会还原勾选态并提示。 -->
+                                    <!-- 判断型(yesno)智能体：预警条件 alarm_condition —— 仅勾「是」=only_yes、仅勾「否」=only_no、
+                                         两者都勾=yes_and_no（描述型恒 none）。缺省(null)/未知值按判断型默认 only_yes 解析，
+                                         与后端 normalize_alarm_condition 一致；下发时由 alarmConditionForDeploy 统一规范化。 -->
                                     <div class="pt-1 border-t border-slate-800/60">
                                         <div class="flex items-center justify-between">
                                             <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-question mr-1.5 text-indigo-400"></i>预警条件<span class="text-[9px] text-slate-500 ml-1.5">可同时勾选</span></span>
@@ -2322,21 +2383,34 @@
                                            class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-indigo-500 text-[11px]" />
                                 </div>
                             </div>
-                            <!-- 报警类型：描述型(freeform)输出自然语言描述、走关键词过滤；判断型(yesno)输出是/否、走报警条件 -->
+                            <!-- 分析模式(analysis_mode)：设备侧 agentLLMParam 内的字段，随本规则一起下发；
+                                 全量分析=大模型对画面做全量分析（设备默认），阈值触发=按小模型阈值模式分析 -->
                             <div>
-                                <label class="block text-[10px] text-slate-400 mb-1">报警类型 (alarm_type)</label>
-                                <select value={activeAlgorithm?.alarm_type || 'freeform'}
-                                        on:change={(e) => changeAlgoAlarmType(config.activeAlgorithmIndex || 0, e.target.value)}
+                                <label class="block text-[10px] text-slate-400 mb-1">分析模式 (analysis_mode)</label>
+                                <select value={config.analysisMode || activeAlgorithm?.analysisMode || defaultConfig.analysisMode}
+                                        on:change={(e) => changeAlgoAnalysisMode(config.activeAlgorithmIndex || 0, e.target.value)}
                                         class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-1.5 focus:border-indigo-500 text-[11px]">
-                                    <option value="freeform">描述型（freeform）· 输出自然语言描述</option>
-                                    <option value="yesno">判断型（yesno）· 输出是 / 否</option>
+                                    <option value="full_analysis">全量分析（full_analysis）· 大模型对画面做全量分析</option>
+                                    <option value="threshold">阈值触发（threshold）· 按小模型阈值模式分析</option>
                                 </select>
                             </div>
+                            <!-- 报警类型(alarm_type)不在此展示：恒由所选智能体自身决定，
+                                 面板据 activeAlgoAgentAlarmType 自动切到对应条件区（描述型=条件判断/字符匹配，判断型=预警条件） -->
                             <div>
-                                <div class="flex justify-between items-center mb-1"><label class="text-[10px] text-slate-400">智能体大模型视觉推理 Prompt 策略</label><span class="text-[9px] text-slate-600">Markdown语义控制</span></div>
-                                <textarea bind:value={config.prompt} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="等待指令注入..."></textarea>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="text-[10px] text-slate-400">智能体大模型视觉推理 Prompt 策略</label>
+                                    <div class="flex items-center gap-2">
+                                        <button type="button" on:click={restoreAlgoAgentPrompt}
+                                                title="用所选智能体在设备上已有的 Prompt 覆盖本输入框"
+                                                class="text-[9px] text-indigo-400 hover:text-indigo-300 border border-indigo-500/30 hover:border-indigo-400/60 rounded px-1.5 py-0.5 transition">
+                                            <i class="fa-solid fa-rotate-left mr-1"></i>恢复智能体默认 Prompt
+                                        </button>
+                                        <span class="text-[9px] text-slate-600">Markdown语义控制</span>
+                                    </div>
+                                </div>
+                                <textarea bind:value={config.prompt} rows="5" class="w-full text-[11px] font-mono text-slate-300 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded p-2 leading-relaxed" placeholder="选择智能体后自动填入其自带 Prompt，可在此微调..."></textarea>
                             </div>
-                            {#if (activeAlgorithm?.alarm_type || 'freeform') === 'freeform'}
+                            {#if activeAlgoAgentAlarmType === 'freeform'}
                                 <!-- 描述型：条件判断开关 + 字符匹配（filter_enable/filter_keywords），命中才上报 -->
                                 <div class="pt-1 border-t border-slate-800/60">
                                     <div class="flex items-center justify-between">
@@ -2355,7 +2429,7 @@
                                 </div>
                             {:else}
                                 <!-- 判断型(yesno)：预警条件支持同时勾选「是」与「否」
-                                     仅勾是→only_yes / 仅勾否→only_no / 都勾→none（是/否都报警）；两项都不勾非法 -->
+                                     仅勾是→only_yes / 仅勾否→only_no / 都勾→yes_and_no（是/否都报警）；两项都不勾非法 -->
                                 <div class="pt-1 border-t border-slate-800/60">
                                     <div class="flex items-center justify-between">
                                         <span class="text-[10px] text-slate-400 flex items-center"><i class="fa-solid fa-circle-check mr-1.5 text-indigo-400"></i>预警条件<span class="text-[9px] text-slate-500 ml-1.5">可同时勾选</span></span>
