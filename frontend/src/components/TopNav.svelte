@@ -17,14 +17,14 @@
         return 'bg-slate-500';
     }
 
-    // 归属于“基础配置”的子功能项
-    const basicIds = ['devices', 'tasks', 'logs', 'services', 'network', 'llm'];
+    // 归属于“基础配置”的子功能项（与 App.svelte 的 basicItems 保持一致：
+    // 这些项在顶部只点亮「基础配置」，实际内容由左侧子菜单切换）
+    const basicIds = ['devices', 'tasks', 'taskops', 'feedback', 'logs', 'services', 'network', 'llm'];
 
     // fa = FontAwesome 图标类；badge = 右上角红色计数（可选）
     const menuItems = [
         { id: 'aicontrol', fa: 'fa-comments', label: 'AI 双模态布控' },
-        { id: 'taskops', fa: 'fa-table-list', label: '任务运维列表' },
-        { id: 'feedback', fa: 'fa-circle-exclamation', label: '告警反馈闭环', badge: 1 },
+        { id: 'imagesearch', fa: 'fa-magnifying-glass-chart', label: '图文互搜' },
         { id: 'alerts', fa: 'fa-bell', label: '预警管理' },
         { id: 'library', fa: 'fa-diagram-project', label: '智能体资产库' },
         { id: 'basic', fa: 'fa-gear', label: '基础配置' }

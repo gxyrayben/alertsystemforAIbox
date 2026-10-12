@@ -160,6 +160,8 @@
     }
 
     // 通道下拉项来自当前设备的通道快照（通道对象的 device_name 即通道名），默认「全通道」
+    // 注意：设备侧原始 device_id 是【数字】，必须先 String() 再 trim —— 直接 .trim() 会抛
+    // TypeError 并被下面的 catch 吞掉，结果整个下拉只剩「全通道」。
     $: channelOptions = parseChannelsNames($selectedDevice); 
     function parseChannelsNames(dev) {
         try {
@@ -170,9 +172,9 @@
             const validChannels = [];
 
             for (const item of rawList) {
-                // 提取唯一通道 ID（兼顾常见的几种后端字段命名）
-                const cid = item?.device_id.trim();
-                const name = item?.device_name?.trim();
+                // 提取唯一通道 ID（device_id 可能是数字或字符串，统一转字符串；兼容常见的几种字段命名）
+                const cid = String(item?.device_id ?? '').trim();
+                const name = String(item?.device_name ?? '').trim();
 
                 // 核心校验：必须同时具备通道 ID 和 通道名称
                 if (cid && name) {

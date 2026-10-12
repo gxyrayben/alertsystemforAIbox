@@ -249,6 +249,23 @@ class ServicesConfig(BaseModel):
     http: ServiceConfig
     tls: Optional[TlsConfig] = None
 
+class ImageSearchRequest(BaseModel):
+    """图文互搜·文搜图请求体。
+
+    kind：检索目标 —— 'big' 告警大图（整帧）/ 'crop' 送检小图（目标裁切，需已建索）；
+    top_k：返回条数（1~200）；
+    其余为可选过滤条件：设备名 / 通道名 / 通道号 / 预警类型 / 时间范围（YYYY-MM-DD 或 ISO 字符串）。
+    """
+    query: str
+    kind: str = "big"
+    top_k: int = 30
+    deviceName: Optional[str] = None
+    channelname: Optional[str] = None
+    channelid: Optional[str] = None
+    alertType: Optional[str] = None
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+
 class NetworkConfigUpdate(BaseModel):
     backend_interface_id: str
     frontend_interface_id: str

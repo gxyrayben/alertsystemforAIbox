@@ -1045,7 +1045,9 @@ class DeviceService:
                     onlinestatus = "online" if status == 0 else "offline"
                     #print(f"onlinestatus:{onlinestatus}")
                     results.append({
-                        "device_id": device_id,
+                        # 通道 ID 统一成字符串：设备侧原值是【数字】，而 alerts.channelid 与前端比较都按
+                        # 字符串处理，快照里混用 int/string 会让「按通道过滤」静默失配（与 _parse_channels 同口径）
+                        "device_id": str(device_id) if device_id is not None else "",
                         "device_name": item.get("device_name"),
                         "proto": item.get("proto"),
                         "rtsp": item.get("rtsp_param", {}).get("url"),

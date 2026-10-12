@@ -71,6 +71,15 @@ Everything is HTTP by default; HTTPS is a **config switch**, not a code branch:
 - **设备侧（出站）**：每台设备自带 `protocol`（http/https，默认 http）与 `tls_verify`（默认 false = **跳过证书校验**，兼容 BOX 自签证书）。所有设备 URL 必须经 `DeviceService.base_url(device)` 拼接，所有设备 HTTP 客户端必须经 `DeviceService.new_client(device, timeout=...)` 创建（verify 策略在工厂里）——**不要在各处自建 `httpx.AsyncClient`**，否则 HTTPS 下自签证书会让调用全部失败。按 ip/port 走的 `fetch_device_data(..., protocol=, tls_verify=)` 同样要传这两个参数。调用公网 LLM 的 `llm_client.py` 不在此列（走系统 CA 校验）。
 - **证书**：在 `backend/` 下执行 `python tools/gen_self_signed_cert.py` 生成 `backend/certs/server.crt|key`（优先 openssl，缺则用 cryptography 库），已加入 `.gitignore`。前端 dev server 可选 HTTPS（避免混合内容）：`VITE_HTTPS=1 VITE_CERT=../backend/certs/server.crt VITE_KEY=../backend/certs/server.key npm run dev`。
 
+## 图文互搜（Chinese-CLIP 文搜图 / 以图搜图）
+
+- **模型**：本地 `Chinese-CLIP ViT-B/16`（`OFA-Sys/chinese-clip-vit-base-patch16`），权重放 `backend/models/chinese-clip-vit-base-patch16/`（已 gitignore）。下载：`python tools/download_clip_model.py`（默认走 hf-mirror.com 镜像并跳过重复的 `.pt`，约 720MB）。**huggingface.co 在国内常被墙，必须走镜像**。
+- **封装**：`services/clip_service.py` —— 懒加载单例（首次用到才载入，不拖慢启动）、设备自动选择 `cuda → mps(Apple Silicon) → cpu`（Mac/Win 同一套代码）、向量 L2 归一化。注意 **transformers 5.x 的 `get_text_features/get_image_features` 返回 `BaseModelOutputWithPooling`**，特征在 `pooler_output`（512 维），已由 `_extract_features()` 兼容 4.x/5.x 两种返回。
+- **索引**：表 `image_embeddings`（一行 = 一张图的一条向量；`kind` 区分 `big` 告警整帧 / `crop` 送检小图）。**非实时建模**：`services/image_index_service.py` 由 APScheduler 每 `image_search.interval_seconds` 秒跑一小批（`per_cycle` 张，编码在线程池里，不阻塞事件循环）；编码失败写 `dim=0` 墓碑行避免反复重试坏图；告警被 7 天清理后由 `prune_orphans()` 清孤儿向量。
+- **检索**：`routers/search.py`（`/search/status|text|image|reindex`）。向量池按 kind 常驻内存（`_index_version` 版本号自动失效重建），检索 = 矩阵乘 + top-k，10w 张规模无需 FAISS；过滤条件（设备/通道/类型/时间）先转成允许的 alert_id 集合再做掩码。
+- **前端**：`ImageSearch.svelte`（顶部横向导航「图文互搜」，位于「预警管理」之前）。索引状态每 5s 轮询，含进度/失败数/推理设备；支持文搜图与以图搜图、按相似度排序的图片墙、双击看大图。
+- **配置**：`config.json` 的 `image_search` 块（enabled / model_dir / device / batch_size / interval_seconds / per_cycle），老配置缺该块会自动与默认值合并。
+
 ## Conventions
 
 - Code comments and user-facing strings are in **Chinese**; match that when editing existing files.

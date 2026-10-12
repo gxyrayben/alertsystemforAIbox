@@ -13,6 +13,20 @@ DEFAULT_TLS_CONFIG = {
     "key_file": "certs/server.key",
 }
 
+# 图文互搜（Chinese-CLIP 特征提取）默认配置。
+# model_dir 相对 backend/ 工作目录；device 留空=自动选择（cuda → mps → cpu，Mac/Win 通用）。
+DEFAULT_IMAGE_SEARCH_CONFIG = {
+    "enabled": True,
+    "model_dir": "models/chinese-clip-vit-base-patch16",
+    "hf_repo": "OFA-Sys/chinese-clip-vit-base-patch16",
+    "hf_endpoint": "https://hf-mirror.com",
+    "device": "",
+    "batch_size": 8,
+    # 后台增量建索：每 interval_seconds 跑一轮，每轮最多处理 per_cycle 张图（避免长时间占 CPU）
+    "interval_seconds": 60,
+    "per_cycle": 120,
+}
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -26,6 +40,7 @@ def load_config():
             "http": {"enabled": True, "port": "80", "path": "/api/http/alarms"}
         },
         "tls": dict(DEFAULT_TLS_CONFIG),
+        "image_search": dict(DEFAULT_IMAGE_SEARCH_CONFIG),
         "backend_interface_id": None,
         "frontend_interface_id": None,
         "llm_config": {
@@ -40,6 +55,7 @@ def save_config():
     config_data = {
         "services_config": current_services_config,
         "tls": tls_config,
+        "image_search": image_search_config,
         "backend_interface_id": backend_interface_id,
         "frontend_interface_id": frontend_interface_id,
         "llm_config": llm_config
@@ -55,6 +71,8 @@ _config = load_config()
 current_services_config = _config.get("services_config")
 # 服务端 TLS：与默认值合并，保证老 config.json（无 tls 字段）也能取到 cert/key 默认路径
 tls_config = {**DEFAULT_TLS_CONFIG, **(_config.get("tls") or {})}
+# 图文互搜：与默认值合并，老 config.json（无 image_search 字段）也能直接用
+image_search_config = {**DEFAULT_IMAGE_SEARCH_CONFIG, **(_config.get("image_search") or {})}
 backend_interface_id = _config.get("backend_interface_id") or _config.get("selected_interface_id")
 frontend_interface_id = _config.get("frontend_interface_id") or _config.get("selected_interface_id")
 llm_config = _config.get("llm_config")

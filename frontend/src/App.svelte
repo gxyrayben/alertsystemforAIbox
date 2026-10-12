@@ -8,6 +8,7 @@
     import LLMConfig from './components/LLMConfig.svelte';
     import Logs from './components/Logs.svelte';
     import AIControl from './components/AIControl.svelte';
+    import ImageSearch from './components/ImageSearch.svelte';
     import TaskOps from './components/TaskOps.svelte';
     import Feedback from './components/Feedback.svelte';
     import AgentLibrary from './components/AgentLibrary.svelte';
@@ -23,6 +24,8 @@
     const basicItems = [
         { id: 'devices', fa: 'fa-server', label: '设备接入' },
         { id: 'tasks', fa: 'fa-list-check', label: '任务管理' },
+        { id: 'taskops', fa: 'fa-table-list', label: '任务运维列表' },
+        { id: 'feedback', fa: 'fa-circle-exclamation', label: '告警反馈闭环' },
         { id: 'logs', fa: 'fa-file-lines', label: '日志管理' },
         { id: 'services', fa: 'fa-gears', label: '服务管理' },
         { id: 'network', fa: 'fa-network-wired', label: '网络配置' },
@@ -68,6 +71,10 @@
                     <Devices />
                 {:else if $activeMenu === 'tasks'}
                     <Tasks />
+                {:else if $activeMenu === 'taskops'}
+                    <TaskOps />
+                {:else if $activeMenu === 'feedback'}
+                    <Feedback />
                 {:else if $activeMenu === 'logs'}
                     <Logs />
                 {:else if $activeMenu === 'network'}
@@ -83,10 +90,8 @@
         <main class="flex-1 overflow-auto p-6 min-w-0">
             {#if $activeMenu === 'aicontrol'}
                 <AIControl />
-            {:else if $activeMenu === 'taskops'}
-                <TaskOps />
-            {:else if $activeMenu === 'feedback'}
-                <Feedback />
+            {:else if $activeMenu === 'imagesearch'}
+                <ImageSearch />
             {:else if $activeMenu === 'alerts'}
                 <Alerts />
             {:else if $activeMenu === 'library'}

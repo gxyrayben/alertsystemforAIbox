@@ -28,6 +28,8 @@ backend/*.jpg
 backend/test_payload.json
 # 服务端 TLS 证书/私钥：由 tools/gen_self_signed_cert.py 生成，不入库（含私钥）
 backend/certs/
+# Chinese-CLIP 本地权重（约 720MB）：由 tools/download_clip_model.py 下载，不入库
+backend/models/chinese-clip-vit-base-patch16/
 logs/
 
 # IDEs

@@ -34,3 +34,8 @@ export const apiPut = (path, body) =>
     });
 
 export const apiDelete = (path) => apiFetch(path, { method: 'DELETE' });
+
+// 上传文件（multipart/form-data）：不要手写 Content-Type，交给浏览器带 boundary。
+// 目前用于「图文互搜」的以图搜图（POST /search/image）。
+export const apiUpload = (path, formData) =>
+    apiFetch(path, { method: 'POST', body: formData });

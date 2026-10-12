@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, BigInteger, Boolean
+from sqlalchemy import Column, String, BigInteger, Boolean, Integer, LargeBinary, Index
 from models.db import Base
 
 class DeviceORM(Base):
@@ -126,3 +126,30 @@ class MessageORM(Base):
     text = Column(String, default="")
     tables = Column(String, default="")  # 助手回复附带的表格数据（JSON 字符串），用于历史还原
     created_at = Column(BigInteger, index=True, nullable=False)
+
+
+class ImageEmbeddingORM(Base):
+    """图文互搜的图片向量索引（Chinese-CLIP 图像特征）。
+
+    一行 = 一张图（告警大图或送检小图）的一条特征向量：
+    - id            ：`{alert_id}:{kind}`，天然幂等（同一张图重复建模即覆盖，不会重复入库）
+    - kind          ：'big'=告警大图(imageUrl) / 'crop'=送检小图(imageUrlCrop)，两类分开检索
+    - image_path    ：归一化后的相对路径（如 uploads/2026-10-12/18/x.jpg）；与告警当前路径不一致
+                      说明文件被换过，下次增量扫描会重新建模
+    - model         ：产生该向量的模型/维度标识；换模型后旧向量会被判为过期并重建
+    - vector        ：float32 的 L2 归一化向量（BLOB，512 维 = 2KB/张；10w 张约 200MB）
+    - created_at    ：建模时间（毫秒时间戳）
+    """
+    __tablename__ = "image_embeddings"
+    id = Column(String, primary_key=True)
+    alert_id = Column(String, index=True, nullable=False)
+    kind = Column(String, index=True, nullable=False)
+    image_path = Column(String, default="")
+    model = Column(String, default="")
+    dim = Column(Integer, default=0)
+    vector = Column(LargeBinary, nullable=False)
+    created_at = Column(BigInteger, index=True, nullable=False)
+
+
+# 增量扫描按 (alert_id, kind) 做 NOT EXISTS 关联查询 -> 该联合索引让「哪些告警还没建索」不必全表扫
+Index("ix_image_embeddings_alert_kind", ImageEmbeddingORM.alert_id, ImageEmbeddingORM.kind)

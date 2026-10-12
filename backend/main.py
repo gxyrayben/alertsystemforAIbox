@@ -9,15 +9,17 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import os
 import time
+import database
 from sqlalchemy import text
 from sqlalchemy.future import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from routers import devices, alerts, network, services, chat, llm, tasks, logs, conversations, feedback, task_templates
+from routers import (devices, alerts, network, services, chat, llm, tasks, logs, conversations,
+                     feedback, task_templates, search)
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
-from services import alarm_services
+from services import alarm_services, image_index_service
 from services.auto_tune_worker import run_auto_tune_cycle
 
 scheduler = AsyncIOScheduler()
@@ -100,6 +102,10 @@ async def lifespan(app: FastAPI):
         
     scheduler.add_job(clean_old_alerts, IntervalTrigger(hours=1), id="clean_old_alerts")
     scheduler.add_job(run_auto_tune_cycle, IntervalTrigger(seconds=60), id="run_auto_tune_cycle")
+    # 图文互搜：非实时建模——后台定时增量提取 Chinese-CLIP 特征（每轮一小批，不阻塞接口）
+    _idx_interval = int(database.image_search_config.get("interval_seconds") or 60)
+    scheduler.add_job(image_index_service.run_index_cycle,
+                      IntervalTrigger(seconds=max(10, _idx_interval)), id="image_index_cycle")
     scheduler.start()
     
     # 启动动态的 WS 和 HTTP 报警服务
@@ -137,10 +143,10 @@ app.include_router(logs.router)
 app.include_router(conversations.router)
 app.include_router(feedback.router)
 app.include_router(task_templates.router)
+app.include_router(search.router)
 
 if __name__ == "__main__":
     import uvicorn
-    import database
     # TLS 开关（config.json 的 tls 块）：启用且证书齐备时以 HTTPS 启动，否则回落 HTTP（详见 database.tls_ssl_kwargs）
     _ssl_kwargs = database.tls_ssl_kwargs()
     print(f"API 服务启动：{'https' if _ssl_kwargs else 'http'}://0.0.0.0:8000")
