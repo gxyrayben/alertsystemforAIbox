@@ -318,8 +318,12 @@ async def _hits_from_scores(kind: str, scores: np.ndarray, top_k: int,
             "alert_id": a.id,
             "score": round(score, 4),
             "kind": kind,
-            "imageUrl": a.imageUrl if kind == "big" else a.imageUrlCrop,
-            "imageUrlCrop": a.imageUrlCrop,
+            # 关联关系：同一告警的【大图 + 小图】一并返回，前端检索命中小图时可看对应大图，反之亦然
+            "imageUrl": a.imageUrl,          # 告警大图（整帧）
+            "imageUrlCrop": a.imageUrlCrop,  # 送检小图（目标裁切），可能为空
+            # 本次实际命中的是哪一张（前端据此高亮缩略图/文案）
+            "matched_image": a.imageUrl if kind == "big" else a.imageUrlCrop,
+            "matched_kind": kind,
             "deviceName": a.deviceName,
             "alertType": a.alertType,
             "channelname": a.channelname,

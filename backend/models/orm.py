@@ -40,6 +40,9 @@ class AlertORM(Base):
     feedback_note = Column(String, default="")        # 标注备注/误报原因
     feedback_time = Column(BigInteger, nullable=True) # 最近一次标注时间（毫秒）
     feedback_submitted = Column(BigInteger, default=0) # 是否已提交后端优化：0 否 / 1 是
+    # 设备上报的原始 JSON（截断保存，见 alarm_ingest.dump_raw_payload）：详情页可展开查看，
+    # 也便于后续新增字段（如目标 TrackID）时不必再回溯历史报文
+    rawPayload = Column(String, default="")
 
 class TaskORM(Base):
     __tablename__ = "tasks"

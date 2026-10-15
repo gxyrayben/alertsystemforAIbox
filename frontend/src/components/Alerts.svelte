@@ -256,6 +256,58 @@
         }
     }
 
+    // ── 预警详情（只读弹窗）：大图/小图 + 设备信息 + 通道信息 + 描述信息 + 原始上报报文 ──
+    let detail = null;          // GET /alerts/{id} 的返回
+    let detailLoading = false;
+    let detailError = '';
+    let mainImage = '';         // 详情里当前展示的主图（大图/小图可切换）
+    let showRawPayload = false;
+
+    async function openAlertDetail(alert) {
+        detail = null;
+        detailError = '';
+        mainImage = '';
+        showRawPayload = false;
+        detailLoading = true;
+        try {
+            const d = await apiGet(`/alerts/${alert.id}`);
+            detail = d;
+            // 主图优先大图（整帧），没有大图则回落小图
+            mainImage = d.imageUrl ? `${API_BASE}${d.imageUrl}`
+                : (d.imageUrlCrop ? `${API_BASE}${d.imageUrlCrop}` : '');
+        } catch (e) {
+            detailError = e?.detail || '加载预警详情失败（后端不可达？）';
+        } finally {
+            detailLoading = false;
+        }
+    }
+
+    function closeAlertDetail() {
+        detail = null;
+        detailError = '';
+        mainImage = '';
+        showRawPayload = false;
+    }
+
+    function fmtFullTime(ts) {
+        if (!ts) return '—';
+        const d = new Date(Number(ts));
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    // 详情里记录的图片真实像素尺寸（用于一眼区分整帧大图与目标小图：设备当前只发小图）
+    let imgMeta = {};
+    function recordImgSize(url, ev) {
+        const w = ev?.target?.naturalWidth, h = ev?.target?.naturalHeight;
+        if (w && h) imgMeta = { ...imgMeta, [url]: `${w}×${h}` };
+    }
+    const sizeOf = (path) => (path ? imgMeta[`${API_BASE}${path}`] || '' : '');
+
+    // 反馈状态中文（详情里只读展示）
+    const FEEDBACK_LABEL = { valid: '真实告警', false_positive: '误报', '': '未标注' };
+    const feedbackLabel = (s) => FEEDBACK_LABEL[s ?? ''] ?? s;
+
     function getAlertStyle(type) {
         switch (type) {
             case 'FIRE':
@@ -337,7 +389,15 @@
                             <div class="absolute top-3 right-3 px-2 py-1 rounded text-xs font-bold {getAlertStyle(alert.alertType)}">{alert.alertType}</div>
                         </div>
                         <div class="p-4 flex flex-col flex-1">
-                            <h3 class="text-sm font-bold text-slate-100 mb-2 truncate" title={alert.deviceName}>{alert.deviceName}</h3>
+                            <div class="flex items-start justify-between gap-2 mb-2">
+                                <h3 class="text-sm font-bold text-slate-100 truncate" title={alert.deviceName}>{alert.deviceName}</h3>
+                                <!-- 查看详情：放在设备名右侧（卡片信息区顶部），不再占底部整行 -->
+                                <button on:click={() => openAlertDetail(alert)}
+                                        class="shrink-0 whitespace-nowrap bg-slate-900 hover:bg-indigo-600 border border-slate-800 hover:border-indigo-500 text-slate-300 hover:text-white rounded-lg px-2 py-1 text-[11px] font-bold transition flex items-center"
+                                        title="查看预警详情（大图/小图、设备与通道信息、描述、原始报文）">
+                                    <i class="fa-solid fa-up-right-and-down-left-from-center text-[10px] mr-1"></i>查看详情
+                                </button>
+                            </div>
                             <div class="flex items-center text-xs text-slate-500 mb-3"><i class="fa-solid fa-clock text-xs mr-1.5"></i>{alert.time}</div>
                             <div class="mt-auto pt-3 border-t border-slate-800">
                                 <div class="flex justify-between items-start mb-1">
@@ -380,6 +440,152 @@
         {/if}
     </div>
 </div>
+
+{#if detail || detailLoading || detailError}
+<!-- 预警详情（只读）：左图右信息；大图/小图可切换；原始报文可折叠 -->
+<!-- svelte-ignore a11y-click-events-have-key-events -->
+<!-- svelte-ignore a11y-no-static-element-interactions -->
+<div class="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" on:click|self={closeAlertDetail}>
+    <div class="bg-slate-950 border border-slate-800 rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between">
+            <div class="flex items-center gap-3 min-w-0">
+                <h3 class="text-white font-bold truncate">预警详情</h3>
+                {#if detail}
+                    <span class="text-xs px-2 py-0.5 rounded {getAlertStyle(detail.alertType)}">{detail.alertType}</span>
+                    <span class="text-[11px] text-slate-500 truncate">{detail.deviceName}{detail.channelname ? ` · ${detail.channelname}` : ''}</span>
+                {/if}
+            </div>
+            <button on:click={closeAlertDetail} class="text-slate-400 hover:text-slate-200" title="关闭"><i class="fa-solid fa-xmark text-lg"></i></button>
+        </div>
+
+        {#if detailLoading}
+            <div class="p-16 text-center text-slate-400"><i class="fa-solid fa-arrows-rotate animate-spin mr-2"></i>正在加载预警详情…</div>
+        {:else if detailError}
+            <div class="p-16 text-center text-rose-400"><i class="fa-solid fa-triangle-exclamation mr-2"></i>{detailError}</div>
+        {:else if detail}
+            <div class="flex-1 overflow-auto p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- 左：图片（主图 + 缩略图切换） -->
+                <div class="space-y-3">
+                    <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden aspect-video flex items-center justify-center relative">
+                        {#if mainImage}
+                            <img src={mainImage} alt="预警图片" class="w-full h-full object-contain cursor-zoom-in"
+                                 on:load={(e) => recordImgSize(mainImage, e)}
+                                 on:dblclick={() => openViewer(mainImage)} title="双击查看大图" />
+                            {#if imgMeta[mainImage]}
+                                <span class="absolute bottom-2 right-2 text-[10px] px-1.5 py-0.5 rounded bg-black/70 text-slate-300 font-mono">{imgMeta[mainImage]} px</span>
+                            {/if}
+                        {:else}
+                            <div class="flex flex-col items-center text-slate-500"><i class="fa-solid fa-camera text-3xl mb-2 opacity-50"></i><span class="text-xs">该预警没有留存图片</span></div>
+                        {/if}
+                    </div>
+                    <div class="flex gap-3">
+                        {#if detail.imageUrl}
+                            <button on:click={() => (mainImage = `${API_BASE}${detail.imageUrl}`)}
+                                    class="relative w-28 h-20 rounded-lg overflow-hidden border-2 {mainImage === `${API_BASE}${detail.imageUrl}` ? 'border-indigo-500' : 'border-slate-800 hover:border-slate-600'}">
+                                <img src="{API_BASE}{detail.imageUrl}" alt="告警大图" class="w-full h-full object-cover" on:load={(e) => recordImgSize(`${API_BASE}${detail.imageUrl}`, e)} />
+                                <span class="absolute bottom-0 left-0 right-0 text-[9px] text-center bg-black/60 text-slate-200">
+                                    告警大图（整帧）{sizeOf(detail.imageUrl) ? ` ${sizeOf(detail.imageUrl)}` : ''}
+                                </span>
+                            </button>
+                        {/if}
+                        {#if detail.imageUrlCrop}
+                            <button on:click={() => (mainImage = `${API_BASE}${detail.imageUrlCrop}`)}
+                                    class="relative w-28 h-20 rounded-lg overflow-hidden border-2 {mainImage === `${API_BASE}${detail.imageUrlCrop}` ? 'border-indigo-500' : 'border-slate-800 hover:border-slate-600'}">
+                                <img src="{API_BASE}{detail.imageUrlCrop}" alt="送检小图" class="w-full h-full object-cover" on:load={(e) => recordImgSize(`${API_BASE}${detail.imageUrlCrop}`, e)} />
+                                <span class="absolute bottom-0 left-0 right-0 text-[9px] text-center bg-black/60 text-slate-200">
+                                    送检小图（裁切）{sizeOf(detail.imageUrlCrop) ? ` ${sizeOf(detail.imageUrlCrop)}` : ''}
+                                </span>
+                            </button>
+                        {/if}
+                        {#if !detail.imageUrl && !detail.imageUrlCrop}
+                            <span class="text-[11px] text-slate-500">无图片</span>
+                        {/if}
+                    </div>
+                    {#if detail.imageUrl && !detail.imageUrlCrop && sizeOf(detail.imageUrl)}
+                        <p class="text-[10px] text-amber-400/80">
+                            <i class="fa-solid fa-circle-info mr-1"></i>本次上报只带了一张图（{sizeOf(detail.imageUrl)}）。设备约定第 1 个二进制是整帧大图、第 2 个是目标小图。
+                        </p>
+                    {/if}
+                </div>
+
+                <!-- 右：信息区 -->
+                <div class="space-y-4">
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                        <p class="text-xs font-bold text-slate-300 mb-3"><i class="fa-solid fa-circle-info mr-1.5 text-indigo-400"></i>基本信息</p>
+                        <div class="grid grid-cols-2 gap-y-2.5 text-[11px]">
+                            <span class="text-slate-500">预警时间</span><span class="text-slate-200">{detail.time || fmtFullTime(detail.timestamp)}</span>
+                            <span class="text-slate-500">预警类型</span><span class="text-slate-200">{detail.alertType || '—'}</span>
+                            <span class="text-slate-500">反馈状态</span>
+                            <span class="text-slate-200">{feedbackLabel(detail.feedback_status)}{detail.feedback_time ? `（${fmtFullTime(detail.feedback_time)}）` : ''}</span>
+                            {#if detail.feedback_note}<span class="text-slate-500">标注备注</span><span class="text-slate-200 break-all">{detail.feedback_note}</span>{/if}
+                            <span class="text-slate-500">预警 ID</span><span class="text-slate-400 font-mono break-all">{detail.id}</span>
+                        </div>
+                    </div>
+
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                        <p class="text-xs font-bold text-slate-300 mb-3"><i class="fa-solid fa-server mr-1.5 text-indigo-400"></i>设备信息</p>
+                        {#if detail.device}
+                            <div class="grid grid-cols-2 gap-y-2.5 text-[11px]">
+                                <span class="text-slate-500">设备名称</span><span class="text-slate-200">{detail.device.name}</span>
+                                <span class="text-slate-500">业务 ID</span><span class="text-slate-200 font-mono break-all">{detail.device.device_id}</span>
+                                <span class="text-slate-500">地址</span><span class="text-slate-200 font-mono break-all">{detail.device.address}</span>
+                                <span class="text-slate-500">在线状态</span><span class="text-slate-200">{detail.device.status || '—'}</span>
+                            </div>
+                        {:else}
+                            <p class="text-[11px] text-slate-500">未匹配到设备记录（设备可能已被删除，或预警来自未接入的设备）。</p>
+                        {/if}
+                    </div>
+
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                        <p class="text-xs font-bold text-slate-300 mb-3"><i class="fa-solid fa-video mr-1.5 text-indigo-400"></i>通道信息</p>
+                        {#if detail.channel && (detail.channel.name || detail.channel.device_id)}
+                            <div class="grid grid-cols-2 gap-y-2.5 text-[11px]">
+                                <span class="text-slate-500">通道名称</span><span class="text-slate-200">{detail.channel.name || '—'}</span>
+                                <span class="text-slate-500">通道号</span><span class="text-slate-200 font-mono">{detail.channel.device_id || '—'}</span>
+                                {#if detail.channel.onlinestatus}
+                                    <span class="text-slate-500">在线状态</span>
+                                    <span class={detail.channel.onlinestatus === 'online' ? 'text-emerald-400' : 'text-slate-400'}>{detail.channel.onlinestatus === 'online' ? '在线' : '离线'}</span>
+                                {/if}
+                                {#if detail.channel.rtsp}
+                                    <span class="text-slate-500">RTSP</span>
+                                    <span class="text-slate-300 font-mono break-all select-all">{detail.channel.rtsp}</span>
+                                {/if}
+                            </div>
+                            {#if !detail.channel.matched}
+                                <p class="text-[10px] text-amber-400/80 mt-2.5">
+                                    <i class="fa-solid fa-circle-info mr-1"></i>设备通道快照里未匹配到该通道（通道号与通道名都没对上），以上名称来自本次上报记录。
+                                </p>
+                            {:else if detail.channel.matched_by === 'name'}
+                                <p class="text-[10px] text-slate-500 mt-2.5">
+                                    <i class="fa-solid fa-circle-info mr-1"></i>按通道名匹配（设备重新接入后通道号已变化，快照里的通道号为 {detail.channel.device_id || '—'}）。
+                                </p>
+                            {/if}
+                        {:else}
+                            <p class="text-[11px] text-slate-500">该预警未携带通道信息。</p>
+                        {/if}
+                    </div>
+
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                        <p class="text-xs font-bold text-slate-300 mb-2"><i class="fa-solid fa-align-left mr-1.5 text-indigo-400"></i>描述信息</p>
+                        <p class="text-[12px] text-slate-300 whitespace-pre-wrap break-words min-h-[42px] bg-slate-950 border border-slate-800 rounded-lg p-2.5">{detail.remark || '（本次上报没有描述内容）'}</p>
+                    </div>
+
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+                        <button on:click={() => (showRawPayload = !showRawPayload)}
+                                class="w-full px-4 py-3 flex items-center justify-between text-xs font-bold text-slate-300 hover:bg-slate-900">
+                            <span><i class="fa-solid fa-code mr-1.5 text-indigo-400"></i>原始上报报文</span>
+                            <span class="text-slate-500 text-[10px]">{showRawPayload ? '收起' : '展开'}<i class="fa-solid fa-chevron-{showRawPayload ? 'up' : 'down'} ml-1"></i></span>
+                        </button>
+                        {#if showRawPayload}
+                            <pre class="px-4 pb-4 text-[11px] text-slate-300 font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto">{detail.rawPayload || '历史数据未采集（该功能上线前的预警没有留存原始报文）'}</pre>
+                        {/if}
+                    </div>
+                </div>
+            </div>
+        {/if}
+    </div>
+</div>
+{/if}
 
 {#if viewerImage}
 <!-- svelte-ignore a11y-click-events-have-key-events -->

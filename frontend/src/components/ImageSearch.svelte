@@ -26,6 +26,25 @@
 
     let viewerImage = null;
 
+    // 命中项查看器：检索命中的是整帧还是小图，都能切到同一告警的对应大图/小图
+    let hitViewer = null;
+    let hitMain = '';
+    let hitMeta = {};
+    function recordHitSize(url, ev) {
+        const w = ev?.target?.naturalWidth, h = ev?.target?.naturalHeight;
+        if (w && h) hitMeta = { ...hitMeta, [url]: `${w}×${h}` };
+    }
+    function openHitViewer(hit) {
+        hitViewer = hit;
+        hitMeta = {};
+        hitMain = hit.matched_image ? `${API_BASE}${hit.matched_image}`
+            : (hit.imageUrl ? `${API_BASE}${hit.imageUrl}` : '');
+    }
+    function closeHitViewer() { hitViewer = null; hitMain = ''; hitMeta = {}; }
+    // 命中的是整帧则"对应小图"是 imageUrlCrop，反之对应大图是 imageUrl
+    const siblingOf = (hit) => (hit.matched_kind === 'big' ? hit.imageUrlCrop : hit.imageUrl);
+    const siblingLabel = (hit) => (hit.matched_kind === 'big' ? '送检小图' : '告警大图');
+
     onMount(async () => {
         await fetchStatus();
         // 建索是后台异步的：状态条轮询刷新（有待处理/正在跑时更密）
@@ -351,13 +370,18 @@
                 {#each hits as hit}
                     <div class="bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden flex flex-col group">
                         <div class="relative aspect-video bg-slate-900 border-b border-slate-800 overflow-hidden">
-                            {#if hit.imageUrl}
-                                <img src="{API_BASE}{hit.imageUrl}" alt={hit.alertType} loading="lazy"
+                            {#if hit.matched_image || hit.imageUrl || hit.imageUrlCrop}
+                                <img src="{API_BASE}{(hit.matched_image || hit.imageUrl || hit.imageUrlCrop)}" alt={hit.alertType} loading="lazy"
                                      class="w-full h-full object-cover cursor-zoom-in transition-transform duration-300 group-hover:scale-105"
-                                     on:dblclick={() => (viewerImage = `${API_BASE}${hit.imageUrl}`)} title="双击查看大图" />
+                                     on:click={() => openHitViewer(hit)}
+                                     on:dblclick={() => (viewerImage = `${API_BASE}${(hit.matched_image || hit.imageUrl || hit.imageUrlCrop)}`)}
+                                     title="点击查看大图/小图，双击全屏" />
                             {:else}
                                 <div class="flex items-center justify-center h-full text-slate-600 text-xs">无图</div>
                             {/if}
+                            <div class="absolute top-2 left-2 px-1.5 py-0.5 rounded text-[10px] font-bold {hit.matched_kind === 'big' ? 'bg-emerald-600/90' : 'bg-amber-600/90'} text-white">
+                                {hit.matched_kind === 'big' ? '整帧' : '小图'}
+                            </div>
                             <div class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-600/90 text-white">
                                 相似 {(hit.score * 100).toFixed(1)}%
                             </div>
@@ -366,6 +390,12 @@
                             <p class="text-xs font-bold text-slate-200 truncate" title={hit.deviceName}>{hit.deviceName || '—'}</p>
                             <p class="text-[11px] text-slate-500 truncate" title={hit.alertType}>{hit.alertType || '—'}{hit.channelname ? ` · ${hit.channelname}` : ''}</p>
                             <p class="text-[10px] text-slate-600">{hit.time || fmtTime(hit.timestamp)}</p>
+                            {#if siblingOf(hit)}
+                                <button on:click={() => openHitViewer(hit)}
+                                        class="text-[10px] text-indigo-400 hover:text-indigo-300 border border-indigo-500/30 hover:border-indigo-400/60 rounded px-1.5 py-0.5 transition flex items-center justify-center">
+                                    <i class="fa-solid fa-right-left mr-1"></i>看对应{siblingLabel(hit)}
+                                </button>
+                            {/if}
                         </div>
                     </div>
                 {/each}
@@ -385,6 +415,66 @@
         {/if}
     </div>
 </div>
+
+<!-- 命中项查看器：同一告警的大图/小图切换查看 -->
+{#if hitViewer}
+    <div class="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-4" on:click|self={closeHitViewer}>
+        <div class="bg-slate-950 border border-slate-800 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+            <div class="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                <div class="min-w-0">
+                    <h3 class="text-white font-bold truncate">{hitViewer.alertType || '—'} · {hitViewer.deviceName || '—'}{hitViewer.channelname ? ` · ${hitViewer.channelname}` : ''}</h3>
+                    <p class="text-[11px] text-slate-500">{hitViewer.time || fmtTime(hitViewer.timestamp)} · 相似度 {(hitViewer.score * 100).toFixed(1)}% · 命中：{hitViewer.matched_kind === 'big' ? '整帧大图' : '送检小图'}</p>
+                </div>
+                <button on:click={closeHitViewer} class="text-slate-400 hover:text-white" title="关闭"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <div class="p-5 grid grid-cols-1 lg:grid-cols-3 gap-5 overflow-auto">
+                <div class="lg:col-span-2 space-y-3">
+                    <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden aspect-video flex items-center justify-center relative">
+                        {#if hitMain}
+                            <img src={hitMain} alt="命中图" class="w-full h-full object-contain" on:load={(e) => recordHitSize(hitMain, e)} />
+                            {#if hitMeta[hitMain]}<span class="absolute bottom-2 right-2 text-[10px] px-1.5 py-0.5 rounded bg-black/70 text-slate-300 font-mono">{hitMeta[hitMain]} px</span>{/if}
+                        {:else}
+                            <span class="text-slate-500 text-xs">该告警没有留存图片</span>
+                        {/if}
+                    </div>
+                    <div class="flex gap-3">
+                        {#if hitViewer.imageUrl}
+                            <button on:click={() => (hitMain = `${API_BASE}${hitViewer.imageUrl}`)}
+                                    class="relative w-28 h-20 rounded-lg overflow-hidden border-2 {hitMain === `${API_BASE}${hitViewer.imageUrl}` ? 'border-indigo-500' : 'border-slate-800 hover:border-slate-600'}">
+                                <img src="{API_BASE}{hitViewer.imageUrl}" alt="告警大图" class="w-full h-full object-cover" on:load={(e) => recordHitSize(`${API_BASE}${hitViewer.imageUrl}`, e)} />
+                                <span class="absolute bottom-0 left-0 right-0 text-[9px] text-center bg-black/60 text-slate-200">告警大图（整帧）{hitMeta[`${API_BASE}${hitViewer.imageUrl}`] ? ` ${hitMeta[`${API_BASE}${hitViewer.imageUrl}`]}` : ''}</span>
+                            </button>
+                        {/if}
+                        {#if hitViewer.imageUrlCrop}
+                            <button on:click={() => (hitMain = `${API_BASE}${hitViewer.imageUrlCrop}`)}
+                                    class="relative w-28 h-20 rounded-lg overflow-hidden border-2 {hitMain === `${API_BASE}${hitViewer.imageUrlCrop}` ? 'border-indigo-500' : 'border-slate-800 hover:border-slate-600'}">
+                                <img src="{API_BASE}{hitViewer.imageUrlCrop}" alt="送检小图" class="w-full h-full object-cover" on:load={(e) => recordHitSize(`${API_BASE}${hitViewer.imageUrlCrop}`, e)} />
+                                <span class="absolute bottom-0 left-0 right-0 text-[9px] text-center bg-black/60 text-slate-200">送检小图（裁切）{hitMeta[`${API_BASE}${hitViewer.imageUrlCrop}`] ? ` ${hitMeta[`${API_BASE}${hitViewer.imageUrlCrop}`]}` : ''}</span>
+                            </button>
+                        {/if}
+                        {#if !hitViewer.imageUrl && !hitViewer.imageUrlCrop}
+                            <span class="text-[11px] text-slate-500">无图片</span>
+                        {/if}
+                    </div>
+                </div>
+                <div class="space-y-3 text-[11px]">
+                    <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-3">
+                        <p class="text-xs font-bold text-slate-300 mb-2"><i class="fa-solid fa-circle-info mr-1.5 text-indigo-400"></i>命中信息</p>
+                        <div class="grid grid-cols-2 gap-y-2">
+                            <span class="text-slate-500">命中图</span><span class="text-slate-200">{hitViewer.matched_kind === 'big' ? '告警大图（整帧）' : '送检小图（裁切）'}</span>
+                            <span class="text-slate-500">设备</span><span class="text-slate-200 truncate">{hitViewer.deviceName || '—'}</span>
+                            <span class="text-slate-500">预警类型</span><span class="text-slate-200">{hitViewer.alertType || '—'}</span>
+                            <span class="text-slate-500">通道</span><span class="text-slate-200">{hitViewer.channelname || '—'}</span>
+                            <span class="text-slate-500">时间</span><span class="text-slate-200">{hitViewer.time || fmtTime(hitViewer.timestamp)}</span>
+                            <span class="text-slate-500">反馈状态</span><span class="text-slate-200">{hitViewer.feedback_status || '未标注'}</span>
+                        </div>
+                    </div>
+                    <p class="text-[10px] text-slate-500 leading-relaxed">同一告警的两张图（整帧大图 + 目标小图）已关联，切换上方缩略图即可交叉查看。</p>
+                </div>
+            </div>
+        </div>
+    </div>
+{/if}
 
 <!-- 大图查看 -->
 {#if viewerImage}

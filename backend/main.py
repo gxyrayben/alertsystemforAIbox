@@ -82,6 +82,8 @@ async def lifespan(app: FastAPI):
             "feedback_note": "ALTER TABLE alerts ADD COLUMN feedback_note TEXT DEFAULT ''",
             "feedback_time": "ALTER TABLE alerts ADD COLUMN feedback_time BIGINT",
             "feedback_submitted": "ALTER TABLE alerts ADD COLUMN feedback_submitted BIGINT DEFAULT 0",
+            # 原始上报 JSON（详情页"原始报文"折叠区 + 后续补字段的数据来源）
+            "rawPayload": "ALTER TABLE alerts ADD COLUMN rawPayload TEXT DEFAULT ''",
         }
         for col, ddl in _alert_migrations.items():
             if col not in alert_cols:

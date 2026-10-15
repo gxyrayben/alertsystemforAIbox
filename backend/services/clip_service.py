@@ -173,13 +173,16 @@ def encode_images_sync(paths: Sequence[str], batch_size: Optional[int] = None) -
     out: List[Optional[np.ndarray]] = [None] * len(paths)
 
     for start in range(0, len(paths), bs):
-        chunk = list(enumerate(paths[start:start + bs]))
+        chunk = paths[start:start + bs]
         imgs, slots = [], []
-        for idx, p in chunk:
+        for i, p in enumerate(chunk):
             try:
                 with Image.open(p) as im:
                     imgs.append(im.convert("RGB"))
-                slots.append(idx)
+                # 注意：写回 out 必须用【绝对下标】(start + i)。之前用 enumerate(切片) 拿到的是
+                # 相对下标(0,1,2…)，导致每批都覆盖写 out[0..bs-1]，后面所有批次永远是 None，
+                # 被误判为编码失败打成墓碑 —— 上万条"失败"的根源。
+                slots.append(start + i)
             except Exception as e:  # noqa: BLE001
                 print(f"[CLIP] 图片读取失败，跳过 {p}: {e}")
         if not imgs:
