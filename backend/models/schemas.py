@@ -384,3 +384,30 @@ class ConversationResponse(BaseModel):
 
 class ConversationDetail(ConversationResponse):
     messages: List[MessageResponse] = []
+
+
+class OrchestrationNode(BaseModel):
+    """编排图里的一个节点。config 随 type 不同含义不同（见前端元件定义）。"""
+    id: str
+    type: str          # task / algo / logic / llm / output
+    x: float = 0
+    y: float = 0
+    config: dict = {}
+
+
+class OrchestrationEdge(BaseModel):
+    source: str
+    target: str
+
+
+class OrchestrationPayload(BaseModel):
+    """创建/更新编排任务的请求体。"""
+    name: str
+    device_id: Optional[str] = ""          # 绑定设备业务ID（空=不限设备）
+    nodes: List[OrchestrationNode] = []
+    edges: List[OrchestrationEdge] = []
+    status: Optional[str] = "stopped"      # enabled / stopped
+
+
+class OrchestrationStatusUpdate(BaseModel):
+    status: str                            # enabled / stopped

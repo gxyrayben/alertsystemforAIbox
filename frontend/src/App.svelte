@@ -8,6 +8,7 @@
     import LLMConfig from './components/LLMConfig.svelte';
     import Logs from './components/Logs.svelte';
     import AIControl from './components/AIControl.svelte';
+    import Orchestration from './components/Orchestration.svelte';
     import ImageSearch from './components/ImageSearch.svelte';
     import TaskOps from './components/TaskOps.svelte';
     import Feedback from './components/Feedback.svelte';
@@ -90,6 +91,8 @@
         <main class="flex-1 overflow-auto p-6 min-w-0">
             {#if $activeMenu === 'aicontrol'}
                 <AIControl />
+            {:else if $activeMenu === 'orchestration'}
+                <Orchestration />
             {:else if $activeMenu === 'imagesearch'}
                 <ImageSearch />
             {:else if $activeMenu === 'alerts'}

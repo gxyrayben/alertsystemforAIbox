@@ -16,7 +16,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from routers import (devices, alerts, network, services, chat, llm, tasks, logs, conversations,
-                     feedback, task_templates, search)
+                     feedback, task_templates, search, orchestration)
 from models.db import engine, Base, AsyncSessionLocal
 from models.orm import AlertORM
 from services import alarm_services, image_index_service
@@ -146,6 +146,7 @@ app.include_router(conversations.router)
 app.include_router(feedback.router)
 app.include_router(task_templates.router)
 app.include_router(search.router)
+app.include_router(orchestration.router)
 
 if __name__ == "__main__":
     import uvicorn

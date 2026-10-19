@@ -11,6 +11,7 @@ from models.db import get_db
 from models.schemas import Alert, AIAnalyzeRequest
 from models.orm import AlertORM, DeviceORM
 from services import alarm_ingest
+from services import orchestration_engine
 
 router = APIRouter(tags=["alerts"])
 
@@ -75,6 +76,11 @@ async def receive_http_alarm(request: Request, db: AsyncSession = Depends(get_db
     )
     db.add(new_alert)
     await db.commit()
+    # 任务编排：让所有启用且匹配设备的编排任务评估这一条原始告警（异步，不阻塞告警入库返回）
+    try:
+        asyncio.create_task(orchestration_engine.on_new_alert(new_alert))
+    except Exception as e:  # noqa: BLE001
+        print(f"[alerts] 编排触发失败：{e}")
     return {"message": "Success", "alert_id": new_id}
 
 

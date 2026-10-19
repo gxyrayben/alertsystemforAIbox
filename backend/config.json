@@ -1,7 +1,7 @@
 {
     "services_config": {
         "ws": {
-            "enabled": true,
+            "enabled": false,
             "port": "8082",
             "path": "/api/ws/alarms",
             "auth_enabled": false,
@@ -9,13 +9,28 @@
             "password": ""
         },
         "http": {
-            "enabled": true,
+            "enabled": false,
             "port": "8081",
             "path": "/api/http/alarms",
             "auth_enabled": false,
             "username": "",
             "password": ""
         }
+    },
+    "tls": {
+        "enabled": false,
+        "cert_file": "certs/server.crt",
+        "key_file": "certs/server.key"
+    },
+    "image_search": {
+        "enabled": true,
+        "model_dir": "models/chinese-clip-vit-base-patch16",
+        "hf_repo": "OFA-Sys/chinese-clip-vit-base-patch16",
+        "hf_endpoint": "https://hf-mirror.com",
+        "device": "",
+        "batch_size": 8,
+        "interval_seconds": 60,
+        "per_cycle": 120
     },
     "backend_interface_id": "WLAN",
     "frontend_interface_id": "en0",

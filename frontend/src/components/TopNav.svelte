@@ -24,6 +24,7 @@
     // fa = FontAwesome 图标类；badge = 右上角红色计数（可选）
     const menuItems = [
         { id: 'aicontrol', fa: 'fa-comments', label: 'AI 双模态布控' },
+        { id: 'orchestration', fa: 'fa-diagram-project', label: '任务编排' },
         { id: 'imagesearch', fa: 'fa-magnifying-glass-chart', label: '图文互搜' },
         { id: 'alerts', fa: 'fa-bell', label: '预警管理' },
         { id: 'library', fa: 'fa-diagram-project', label: '智能体资产库' },

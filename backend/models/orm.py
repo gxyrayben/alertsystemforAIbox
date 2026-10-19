@@ -156,3 +156,47 @@ class ImageEmbeddingORM(Base):
 
 # 增量扫描按 (alert_id, kind) 做 NOT EXISTS 关联查询 -> 该联合索引让「哪些告警还没建索」不必全表扫
 Index("ix_image_embeddings_alert_kind", ImageEmbeddingORM.alert_id, ImageEmbeddingORM.kind)
+
+
+class OrchestrationTaskORM(Base):
+    """任务编排：一条编排任务 = 一张节点图（nodes JSON）+ 连线（edges JSON）。
+
+    - status        ：'enabled' 启用（参与实时判断）/ 'stopped' 停止（只保存不判断）
+    - device_id     ：该编排绑定的设备（元件库的任务/算法都来自这台设备）；空 = 不限设备
+    - nodes         ：JSON 字符串，[{id, type, x, y, config}]，type ∈ task/algo/logic/llm/output
+    - edges         ：JSON 字符串，[{source, target}]
+    """
+    __tablename__ = "orchestration_tasks"
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    status = Column(String, default="stopped", index=True)   # enabled / stopped
+    device_id = Column(String, default="", index=True)        # 绑定设备业务ID（可空=不限）
+    nodes = Column(String, default="[]")
+    edges = Column(String, default="[]")
+    created_at = Column(BigInteger, index=True, nullable=False)
+    updated_at = Column(BigInteger, index=True, nullable=False)
+
+
+class OrchestrationAlarmORM(Base):
+    """任务编排产生的「业务预警」：编排图输出节点触发后落一行。
+
+    - signature     ：触发签名（本次命中的最新告警ID），用于防抖去重（同一签名在防抖窗口内不重复发）
+    - summary       ：人读的触发说明（命中了哪些算法/逻辑链）
+    - images        ：JSON 数组，关联的原始告警图片 URL（大图优先）
+    """
+    __tablename__ = "orchestration_alarms"
+    id = Column(String, primary_key=True, index=True)
+    orchestration_id = Column(String, index=True, nullable=False)
+    orchestration_name = Column(String, default="")
+    output_id = Column(String, default="")
+    output_name = Column(String, default="")
+    device_name = Column(String, default="", index=True)
+    channelname = Column(String, default="")
+    alert_types = Column(String, default="[]")     # 参与命中的原始算法类型（JSON 数组）
+    summary = Column(String, default="")
+    images = Column(String, default="[]")         # 关联图片 URL（JSON 数组）
+    signature = Column(String, default="", index=True)
+    created_at = Column(BigInteger, index=True, nullable=False)
+
+
+Index("ix_orch_alarms_orch_sig", OrchestrationAlarmORM.orchestration_id, OrchestrationAlarmORM.signature)
