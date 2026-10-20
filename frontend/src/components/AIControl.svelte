@@ -86,6 +86,7 @@
     let wizardStep = 1;       // 右侧画板三步向导当前步：1 任务信息 / 2 ROI绘制 / 3 详情参数
     let panelView = 'list';   // 右侧面板视图：list=任务列表（默认）/ editor=布控编辑器（三步向导）
     let togglingTaskId = '';  // 正在切换「是否启用」的任务ID（防重复点击）
+    let deletingTaskId = '';  // 正在删除的任务ID（防重复点击）
     let refreshingTasks = false;  // 正在从设备同步任务列表
     let listNonce = 0;        // 列表重绘计数：开关切换失败时用它把 DOM 复选框还原成真实值
     const WIZARD_STEPS = [
@@ -618,6 +619,12 @@
         if (config.taskMode === 'combined' && !availableAgents.length) await loadAvailableAgents();
     }
 
+    // 通道 id 统一成字符串。
+    // 原因：设备通道列表里的 device_id 是字符串（后端 _parse_channels 做了 str(...)），
+    // 而任务 detail.channel_device_id 是设备返回的原始数字。`<select bind:value>` 是**严格相等**比对
+    // option.__value 的，数字 4 ≠ 字符串 "4" ⇒ 明明有通道却匹配不到、selectedIndex=-1，下拉显示空白。
+    const toChannelKey = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
+
     // Step1 切换关联通道：仅改写 config.channel_device_id（下发直接读它）。
     // 已知边界：智能体槽位上的「已布控」徽标是按方案原通道注入的，切通道后不自动重拉，故提示用户核对。
     function onChannelChange() {
@@ -1029,7 +1036,7 @@
         config = {
             ...config,
             task_id: config.task_id || d.task_id || row.task_id || null,
-            channel_device_id: config.channel_device_id ?? d.channel_device_id ?? row.camera_device_id ?? null
+            channel_device_id: toChannelKey(config.channel_device_id ?? d.channel_device_id ?? row.camera_device_id)
         };
         panelView = 'editor';
         // 编辑态非模板；真实 ROI 已随算法项带回（全屏项 useFullFrame=true / 自定义项有点），门禁自然放行
@@ -1064,7 +1071,7 @@
         }
     }
 
-    // 「是否启用」开关：PUT 任务 enable（设备无硬删除接口，停用即降级），成功后刷新快照
+    // 「是否启用」开关：PUT 任务 enable（仅停用/启用；要彻底移除请用「删除」）
     async function toggleTaskEnable(row, enable) {
         const device = $selectedDevice;
         if (!device?.id) { showToast('请先在顶栏选择一个设备。', 'error'); return; }
@@ -1078,6 +1085,24 @@
             listNonce += 1;   // 复选框已被点翻：重建列表行，还原为设备真实值
         } finally {
             togglingTaskId = '';
+        }
+    }
+
+    // 删除任务：调用设备 DELETE /intelli_manager/task（task_id 放在 body），成功后刷新快照
+    async function deleteTask(row) {
+        const device = $selectedDevice;
+        if (!device?.id) { showToast('请先在顶栏选择一个设备。', 'error'); return; }
+        const name = row.task_name || row.task_id;
+        if (!confirm(`确定删除任务「${name}」(task_id=${row.task_id}) 吗？\n\n删除是在设备上真正移除该布控任务及其算法配置，不可恢复。\n若只是想暂时生效，请改用「是否启用」开关停用。`)) return;
+        deletingTaskId = String(row.task_id);
+        try {
+            const r = await apiDelete(`/devices/${device.id}/tasks/${row.task_id}`);
+            showToast(r?.message || `任务「${name}」已删除。`, 'success');
+            await loadDevices();
+        } catch (e) {
+            showToast(e?.detail || '删除任务失败，请检查设备在线状态。', 'error');
+        } finally {
+            deletingTaskId = '';
         }
     }
 
@@ -1722,6 +1747,11 @@
                                                 class="text-[11px] px-2.5 py-1 rounded-md bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-600/40 transition-all">
                                             <i class="fa-solid fa-pen-to-square mr-1"></i>编辑
                                         </button>
+                                        <button on:click={() => deleteTask(row)} disabled={deletingTaskId === String(row.task_id)}
+                                                title="从设备删除该布控任务（不可恢复）"
+                                                class="ml-1.5 text-[11px] px-2.5 py-1 rounded-md bg-rose-600/20 text-rose-300 border border-rose-500/30 hover:bg-rose-600/40 transition-all disabled:opacity-50">
+                                            <i class="fa-solid {deletingTaskId === String(row.task_id) ? 'fa-arrows-rotate animate-spin' : 'fa-trash-can'} mr-1"></i>删除
+                                        </button>
                                     </td>
                                 </tr>
                             {:else}
@@ -1740,7 +1770,7 @@
         <p class="text-[10px] text-slate-500 mt-3 leading-relaxed">
             <i class="fa-regular fa-lightbulb mr-1 text-amber-400"></i>
             点「编辑」按任务类型载入真实参数：大模型任务只展示分析间隔与智能体 Prompt；小模型任务只展示端侧检测参数（检测目标/阈值/目标个数/时长/冷却）；大小协同任务额外展示目标扩图倍数与二次大模型。
-            关闭「是否启用」即停用该任务及其全部 monitor（设备无硬删除接口，停用为降级手段）。
+            关闭「是否启用」即停用该任务及其全部 monitor；要彻底移除任务请用「删除」（会调用设备删除接口，不可恢复）。
         </p>
         {:else}
         <div class="mb-5 bg-slate-950/60 p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
@@ -1856,8 +1886,12 @@
                             <label class="block text-[10px] text-slate-400 mb-1">关联通道（目标视频流）</label>
                             <select bind:value={config.channel_device_id} on:change={onChannelChange}
                                     class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:border-indigo-500 text-[11px]">
-                                {#if !channelOptions.some((c) => String(c.device_id) === String(config.channel_device_id))}
-                                    <option value={config.channel_device_id}>{config.channel_device_id ?? '（无可选通道）'}</option>
+                                <!-- 兜底项用严格 === 判断：与 <select bind:value> 的匹配规则保持一致，
+                                     否则会出现「按 String 比较认为有匹配、实际绑定却没选中」的空白下拉。 -->
+                                {#if !channelOptions.some((c) => c.device_id === config.channel_device_id)}
+                                    <option value={config.channel_device_id}>
+                                        {config.channel_device_id ? `通道 ${config.channel_device_id}（不在当前设备通道列表中）` : '（无可选通道）'}
+                                    </option>
                                 {/if}
                                 {#each channelOptions as c}
                                     <option value={c.device_id}>{c.display_name}</option>

@@ -428,26 +428,29 @@ class DeviceService:
         return payload
 
     @staticmethod
-    async def authed_post(
+    async def authed_request(
         client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession],
-        path: str, body: Optional[dict] = None, retry: bool = True,
+        method: str, path: str, body: Optional[dict] = None, retry: bool = True,
     ) -> Optional[dict]:
-        """带 sessionID 的鉴权 POST，统一了各设备接口的『会话失效自动重登重试』逻辑。
+        """带 sessionID 的鉴权请求（POST/PUT/DELETE 通用），统一『会话失效自动重登重试』。
 
         设备侧接口路径两种协议下一致，协议取设备自身的 protocol 字段（http/https）；
         首次请求非 200 / code≠0（含会话过期）时，用 challenge_login 重登一次并重试。
         成功返回接口 JSON（dict，含 code/message，供调用方读业务错误）；网络/异常返回 None。
+
+        注意：删除任务的接口是 `DELETE /intelli_manager/task` 且 **参数放在 body 里**
+        （不是路径/查询参数），所以这里必须用 `client.request(method, ..., json=body)`。
         """
         base_url = DeviceService.base_url(device)
         if device.session_id:
             client.cookies.set("sessionID", device.session_id)
 
-        async def _post():
-            res = await client.post(f"{base_url}{path}", json=body or {})
+        async def _send():
+            res = await client.request(method.upper(), f"{base_url}{path}", json=body or {})
             return res.json() if res.status_code == 200 else None
 
         try:
-            data = await _post()
+            data = await _send()
             if data is not None and data.get("code") == 0:
                 return data
             if retry:
@@ -458,11 +461,19 @@ class DeviceService:
                     device.session_id = session_id
                     if db is not None:
                         await db.commit()
-                    return await _post()
+                    return await _send()
             return data
         except Exception as e:
-            print(f"authed_post error {device.ip}{path}: {e}")
+            print(f"authed_request error {device.ip}{method.upper()} {path}: {e}")
             return None
+
+    @staticmethod
+    async def authed_post(
+        client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession],
+        path: str, body: Optional[dict] = None, retry: bool = True,
+    ) -> Optional[dict]:
+        """带 sessionID 的鉴权 POST（authed_request 的薄包装，保持既有调用点不变）。"""
+        return await DeviceService.authed_request(client, device, db, "POST", path, body, retry)
 
     @staticmethod
     async def get_device_tasks(client: httpx.AsyncClient, device: DeviceORM, db: Optional[AsyncSession] = None):
@@ -566,6 +577,24 @@ class DeviceService:
     async def create_monitor(client, device, db, body: dict):
         """算法仓任务第二步：下发 monitor（/intelli_manager/monitor）。"""
         return await DeviceService.authed_post(client, device, db, "/intelli_manager/monitor", body)
+
+    @staticmethod
+    async def delete_task(client, device, db, task_id) -> Tuple[bool, str]:
+        """删除设备上的布控任务：`DELETE /intelli_manager/task`，task_id 放在 body 里。
+
+        设备接口约定：DELETE + body `{"task_id": "17"}`（不是路径参数）。
+        返回 (成功?, 中文消息)，与 set_task_enable 的约定保持一致。
+        """
+        tid = str(task_id or "").strip()
+        if not tid:
+            return False, "缺少 task_id，无法删除"
+        data = await DeviceService.authed_request(
+            client, device, db, "DELETE", "/intelli_manager/task", {"task_id": tid})
+        if data is None:
+            return False, f"任务 task_id={tid} 删除失败：设备「{device.name}」离线或不可达"
+        if data.get("code") != 0:
+            return False, f"任务 task_id={tid} 删除失败：{data.get('message') or '设备返回失败'}"
+        return True, f"任务 task_id={tid} 已删除"
 
     @staticmethod
     async def deploy_warehouse_task(

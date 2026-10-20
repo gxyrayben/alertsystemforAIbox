@@ -478,6 +478,22 @@ async def set_device_task_enable(device_id: str, task_id: str, payload: TaskEnab
     return {"success": True, "task_id": task_id, "enable": payload.enable, "message": msg}
 
 
+@router.delete("/{device_id}/tasks/{task_id}")
+async def delete_device_task(device_id: str, task_id: str, db: AsyncSession = Depends(get_db)):
+    """删除设备上的布控任务。
+
+    设备接口：`DELETE /intelli_manager/task`，body `{"task_id": "17"}`。
+    成功后重新拉取设备快照，保证任务列表/通道状态与设备一致。
+    """
+    device_obj = await get_or_404(db, DeviceORM, device_id, "Device")
+    async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
+        ok, msg = await DeviceService.delete_task(client, device_obj, db, task_id=task_id)
+    if not ok:
+        _raise_device_error(msg)
+    await _resnapshot(device_obj, db)
+    return {"success": True, "task_id": str(task_id), "message": msg}
+
+
 @router.post("/{device_id}/agents")
 async def create_device_agent(device_id: str, agent: AgentCreate, db: AsyncSession = Depends(get_db)):
     """新增智能体：构造 agent_item 下发到设备，成功后重新拉取并回写快照，返回最新列表。"""
