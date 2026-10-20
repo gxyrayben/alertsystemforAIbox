@@ -1,5 +1,6 @@
 <script>
     import { onMount, tick } from 'svelte';
+    import LiveStream from './LiveStream.svelte';
     import { showToast, switchTab, chatRequest, selectedDevice, loadDevices } from '../lib/controlStore.js';
     import { apiPost, apiGet, apiPut, apiDelete, API_BASE } from '../lib/api.js';
 
@@ -631,6 +632,36 @@
         if (isAgentTask && (config.agents || []).some((a) => a.deployed)) {
             showToast('已切换目标通道；槽位上的「已布控」标记仍来自原通道，请自行核对。', 'warning');
         }
+    }
+
+    // ── 通道实时视频流（LIVE）：连接/解码/断流全部由 <LiveStream> 组件负责 ──
+    // 这里只保留状态镜像：给监视区显示「连接中/实时/重连」，以及首帧尺寸（ROI 坐标对齐）。
+    let streamState = 'idle';     // idle | connecting | live | error
+    let streamError = '';
+    let liveAspect = 0;           // 首帧宽高比：容器按它设 aspect-ratio，ROI 归一化坐标才对得上
+    let liveRef = null;           // <LiveStream> 实例（用于「重连」按钮）
+    let streamInfo = {};          // LiveStream 诊断：{ rx 已收帧, live 已解码帧, codec }
+
+    // 监视区状态：由 <LiveStream> 的 status/meta 事件回填
+    function onLiveStatus(ev) {
+        streamState = ev.detail?.state || 'idle';
+        streamError = ev.detail?.message || '';
+        streamInfo = ev.detail?.info || {};
+        if (streamState !== 'live') liveAspect = 0;
+    }
+    // 后端在视频流建立过程中的阶段文案（便于定位卡在哪一步）
+    const STAGE_LABEL = { accepted: '已连后端', subscribed: '已订阅', waiting_frame: '等设备出帧' };
+    const stageLabel = (s) => STAGE_LABEL[s] || '';
+    function onLiveMeta(ev) {
+        const w = ev.detail?.width || 0;
+        const h = ev.detail?.height || 0;
+        if (w > 0 && h > 0) liveAspect = w / h;
+    }
+    function reconnectStream() {
+        // 重建组件触发重连：先清 key 再设回，等价于重新拉流
+        liveAspect = 0;
+        streamState = 'connecting';
+        if (liveRef && typeof liveRef.reconnect === 'function') liveRef.reconnect();
     }
 
     // 算法目录行/算法项的复合标识（事件类型 + 算法仓名），用于下拉选中与切换定位
@@ -2030,11 +2061,30 @@
                             <button on:click={clearRoi} title="删除当前正在绘制的检测区" class="px-2.5 py-1 rounded border bg-slate-900 hover:bg-rose-950 hover:text-rose-400 border-slate-800 hover:border-rose-500/30 transition-colors">
                                 <i class="fa-solid fa-eraser mr-1"></i>清除
                             </button>
-                            <span class="px-2 py-1 bg-slate-900 rounded border border-slate-800 font-mono">1080P</span>
+                            <!-- 实时流状态：连接中/实时/失败（失败时画面自动回退到静态报警图，ROI 仍可画） -->
+                            {#if streamState === 'connecting'}
+                                <span class="px-2 py-1 rounded border border-amber-600/40 bg-amber-950/40 text-amber-300 font-mono"
+                                      title={streamInfo?.rx ? `已收 ${streamInfo.rx} 帧，已解码 ${streamInfo.live || 0} 帧（codec=${streamInfo.codec || '-'}）` : '正在向设备订阅视频流'}>
+                                    <i class="fa-solid fa-arrows-rotate animate-spin mr-1"></i>连接中
+                                    {#if streamInfo?.rx}<span class="opacity-80">收{streamInfo.rx}/解{streamInfo.live || 0}</span>
+                                    {:else if stageLabel(streamInfo?.stage)}<span class="opacity-80">{stageLabel(streamInfo.stage)}</span>{/if}
+                                </span>
+                            {:else if streamState === 'live'}
+                                <span class="px-2 py-1 rounded border border-emerald-600/40 bg-emerald-950/40 text-emerald-300 font-mono" title="设备通道实时视频流">
+                                    <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse mr-1"></span>实时
+                                </span>
+                            {:else if streamState === 'error'}
+                                <button on:click={reconnectStream} class="px-2 py-1 rounded border border-rose-600/40 bg-rose-950/40 text-rose-300 font-mono hover:border-rose-400"
+                                        title={`${streamError || '视频流不可用'}（点击重连）`}>
+                                    <i class="fa-solid fa-video-slash mr-1"></i>重连
+                                </button>
+                            {/if}
+                            <span class="px-2 py-1 bg-slate-900 rounded border border-slate-800 font-mono">{liveAspect >= 1.7 ? '1080P' : (streamState === 'live' ? '实时' : '1080P')}</span>
                         </div>
                     </div>
 
-                    <div class="relative rounded-xl overflow-hidden bg-slate-950 aspect-[16/10]">
+                    <div class="relative rounded-xl overflow-hidden bg-slate-950 {streamState === 'live' ? '' : 'aspect-[16/10]'}"
+                         style={streamState === 'live' && liveAspect ? `aspect-ratio:${liveAspect}` : ''}>
                         {#if !monitorActive}
                             <div class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs flex-col space-y-2 px-4 text-center">
                                 <i class="fa-solid fa-video-slash text-4xl text-slate-700"></i>
@@ -2042,7 +2092,19 @@
                                 <p class="text-[10px] text-slate-600">加载后自动渲染小模型检测框与已配置检测区</p>
                             </div>
                         {:else}
+                            <!-- 底图：静态报警大图（实时流没出画面时可见）；实时流由 LiveStream 覆盖在上层 -->
                             <img src={sceneImage || CAM} alt="" class="w-full h-full object-cover" />
+                            <LiveStream bind:this={liveRef}
+                                        deviceId={$selectedDevice?.id || ''}
+                                        channelId={config.channel_device_id || ''}
+                                        active={monitorActive && wizardStep === 2}
+                                        on:status={onLiveStatus}
+                                        on:meta={onLiveMeta} />
+                            {#if streamState === 'error' && streamError}
+                                <div class="absolute left-2 right-2 bottom-2 z-20 bg-rose-950/90 border border-rose-600/60 text-rose-200 text-[10px] rounded-lg px-2.5 py-1.5 leading-relaxed">
+                                    <i class="fa-solid fa-triangle-exclamation mr-1"></i>{streamError}
+                                </div>
+                            {/if}
                             <svg bind:this={roiSvgRef} on:click={addRoiPoint} role="presentation"
                                  class="absolute inset-0 w-full h-full {roiDrawActive ? 'cursor-crosshair' : 'pointer-events-none'}"
                                  viewBox="0 0 800 500" preserveAspectRatio="none">
