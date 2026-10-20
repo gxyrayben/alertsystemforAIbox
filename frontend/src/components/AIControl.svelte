@@ -1532,7 +1532,11 @@
     });
 </script>
 
-<div class="flex h-full -m-6">
+<!-- 整页固定到「顶部导航栏以下、视口底部」之间：
+     - 移出 main 的文档流（fixed），main 因此没有可滚动内容，不会再出现拖到空白区的情况；
+     - top-16 = TopNav 的 h-16，高度精确贴合，不依赖 main 的 padding；
+     - 内部左右两栏各自 overflow-y-auto，滚动被限制在各自面板内。 -->
+<div class="fixed inset-x-0 top-16 bottom-0 z-0 flex overflow-hidden">
     <!-- 左侧：对话协作面板 -->
     <div class="w-[38%] min-w-[440px] max-w-[640px] bg-slate-950 border-r border-slate-800 flex flex-col h-full shrink-0">
         <div class="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/40 relative">

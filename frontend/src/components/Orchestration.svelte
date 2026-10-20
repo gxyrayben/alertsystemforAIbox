@@ -162,6 +162,7 @@
     let editingId = null;
     let editorName = '';
     let editorDeviceId = '';
+    let editorEnabled = true;      // 新建/编辑一律默认启用（可在工具栏关掉）
     let nodes = [];
     let edges = [];
     let selectedNodeId = null;
@@ -183,9 +184,11 @@
             editorDeviceId = orch.device_id || '';
             nodes = (orch.nodes || []).map((n) => normalizeLegacyConfig({ ...n, config: { ...(n.config || {}) } }));
             edges = (orch.edges || []).map((e, i) => ({ id: e.id || `e_${i}`, source: e.source, target: e.target }));
+            editorEnabled = true;      // 编辑保存后默认开启
         } else {
             editingId = null; editorName = ''; editorDeviceId = $selectedDevice?.device_id || '';
             nodes = []; edges = [];
+            editorEnabled = true;      // 新建默认开启
         }
         selectedNodeId = nodes[0]?.id || null;
         wiringFromId = null; tempEdgePath = ''; rightTab = 'props'; runBanner = null;
@@ -551,13 +554,14 @@
         saving = true;
         const body = {
             name: editorName.trim(), device_id: editorDeviceId,
-            status: editingId ? undefined : 'stopped',
+            status: editorEnabled ? 'enabled' : 'stopped',
             nodes: nodes.map((n) => ({ id: n.id, type: n.type, x: n.x, y: n.y, config: n.config })),
             edges: edges.map((e) => ({ source: e.source, target: e.target })),
         };
         try {
-            if (editingId) { await apiPut(`/orchestration/${editingId}`, body); showToast('编排任务已更新。', 'success'); }
-            else { await apiPost('/orchestration', body); showToast('编排任务已创建（默认停止，可在卡片上启用）。', 'success'); }
+            const tip = editorEnabled ? '已启用' : '已停用';
+            if (editingId) { await apiPut(`/orchestration/${editingId}`, body); showToast(`编排任务已更新（${tip}）。`, 'success'); }
+            else { await apiPost('/orchestration', body); showToast(`编排任务已创建（${tip}）。`, 'success'); }
             editorOpen = false;
             await loadList();
         } catch (e) { showToast(e?.detail || '保存失败', 'error'); }
@@ -583,7 +587,7 @@
         showDiagnose = true;
         try {
             const body = {
-                name: editorName || '(未命名)', device_id: editorDeviceId, status: 'stopped',
+                name: editorName || '(未命名)', device_id: editorDeviceId, status: editorEnabled ? 'enabled' : 'stopped',
                 nodes: nodes.map((n) => ({ id: n.id, type: n.type, x: n.x, y: n.y, config: n.config })),
                 edges: edges.map((e) => ({ source: e.source, target: e.target })),
             };
@@ -628,6 +632,8 @@
     .node-selected { animation: pulseRing 2s infinite; }
 </style>
 
+<!-- 编辑态与列表态互斥：编辑器做成「页面内视图」，保留顶部导航栏，不再全屏浮层 -->
+{#if !editorOpen}
 <div class="space-y-5">
     <!-- 顶部：页签 + 操作 -->
     <div class="flex items-center justify-between flex-wrap gap-3">
@@ -674,9 +680,18 @@
                     <div class="bg-slate-950 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
                         <div class="flex items-start justify-between gap-2">
                             <h3 class="text-sm font-bold text-white truncate" title={o.name}>{o.name}</h3>
-                            <span class="shrink-0 text-[10px] px-2 py-0.5 rounded-full border {o.status === 'enabled' ? 'text-emerald-300 border-emerald-700/60 bg-emerald-950/50' : 'text-slate-400 border-slate-700 bg-slate-900'}">
-                                {o.status === 'enabled' ? '运行中' : '已停止'}
-                            </span>
+                            <div class="shrink-0 flex items-center gap-1.5">
+                                <!-- 异常：配置/连线层面能判定为"不会正常工作"的问题，悬停看明细 -->
+                                {#if o.has_issue}
+                                    <span class="text-[10px] px-2 py-0.5 rounded-full border text-rose-300 border-rose-700/60 bg-rose-950/50 cursor-help"
+                                          title={`检测到 ${o.issues?.length || 0} 个问题：\n· ${(o.issues || []).join('\n· ')}`}>
+                                        <i class="fa-solid fa-triangle-exclamation mr-1"></i>异常
+                                    </span>
+                                {/if}
+                                <span class="text-[10px] px-2 py-0.5 rounded-full border {o.status === 'enabled' ? 'text-emerald-300 border-emerald-700/60 bg-emerald-950/50' : 'text-slate-400 border-slate-700 bg-slate-900'}">
+                                    {o.status === 'enabled' ? '运行中' : '已停止'}
+                                </span>
+                            </div>
                         </div>
                         <div class="flex items-center gap-3 text-[11px] text-slate-500">
                             <span><i class="fa-solid fa-server mr-1"></i>{o.device_id || '不限设备'}</span>
@@ -733,9 +748,11 @@
     {/if}
 </div>
 
-<!-- ══════════ 编排编辑器（全屏） ══════════ -->
-{#if editorOpen}
-    <div class="fixed inset-0 z-[80] bg-slate-950 flex flex-col">
+{:else}
+<!-- ══════════ 编排编辑器（页面内视图：保留顶部导航，高度占满剩余空间） ══════════ -->
+    <!-- 高度取 main 的内容区（main 是 flex-1，高度确定）：顶部导航因此始终可见 -->
+    <div class="relative bg-slate-950 border border-slate-800 rounded-2xl flex flex-col overflow-hidden
+                h-full min-h-[520px]">
         <!-- 顶栏 -->
         <div class="h-14 px-4 border-b border-slate-800 bg-slate-900/60 flex items-center gap-3 shrink-0">
             <i class="fa-solid fa-diagram-project text-indigo-400"></i>
@@ -749,6 +766,13 @@
                 </select>
             </div>
             <span class="text-[11px] text-slate-600">{nodes.length} 节点 · {edges.length} 连线</span>
+            <!-- 默认开启：新建/编辑保存后立即生效，可在此关掉 -->
+            <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none rounded-lg border px-2.5 py-1.5 transition-colors
+                          {editorEnabled ? 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300' : 'border-slate-700 text-slate-400'}"
+                   title="保存后是否立即启用本编排任务">
+                <input type="checkbox" bind:checked={editorEnabled} class="w-3.5 h-3.5 accent-emerald-500" />
+                <span>{editorEnabled ? '保存后启用' : '保存后停用'}</span>
+            </label>
             <div class="ml-auto flex items-center gap-2">
                 <button on:click={autoLayout} class="text-xs text-slate-300 border border-slate-700 hover:bg-slate-800 rounded-lg px-3 py-2"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>自动排布</button>
                 <button on:click={diagnose} disabled={diagnosing} class="text-xs text-emerald-300 border border-emerald-600/50 hover:bg-emerald-500/10 disabled:opacity-50 rounded-lg px-3 py-2">

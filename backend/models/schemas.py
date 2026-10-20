@@ -406,7 +406,7 @@ class OrchestrationPayload(BaseModel):
     device_id: Optional[str] = ""          # 绑定设备业务ID（空=不限设备）
     nodes: List[OrchestrationNode] = []
     edges: List[OrchestrationEdge] = []
-    status: Optional[str] = "stopped"      # enabled / stopped
+    status: Optional[str] = "enabled"      # enabled / stopped（不传时默认开启）
 
 
 class OrchestrationStatusUpdate(BaseModel):

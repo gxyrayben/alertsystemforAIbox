@@ -9,7 +9,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.db import get_db
-from models.orm import OrchestrationAlarmORM, OrchestrationTaskORM
+from models.orm import DeviceORM, OrchestrationAlarmORM, OrchestrationTaskORM
 from models.schemas import OrchestrationPayload, OrchestrationStatusUpdate
 from services import orchestration_engine
 
@@ -42,7 +42,34 @@ def _card(o: OrchestrationTaskORM) -> dict:
 async def list_orchestrations(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(
         select(OrchestrationTaskORM).order_by(desc(OrchestrationTaskORM.updated_at)))).scalars().all()
-    return {"items": [_card(o) for o in rows], "total": len(rows)}
+    cards = []
+    # 设备快照按 device_id 缓存：多张卡片共用一个设备时只查一次库
+    task_cache: dict = {}
+    async def _tasks_of(device_id: str):
+        if device_id not in task_cache:
+            tasks = []
+            if device_id:
+                dev = (await db.execute(
+                    select(DeviceORM).where(DeviceORM.device_id == device_id))).scalars().first()
+                tasks = orchestration_engine._json(dev.device_tasks) if dev else []
+            task_cache[device_id] = tasks if isinstance(tasks, list) else []
+        return task_cache[device_id]
+
+    for o in rows:
+        card = _card(o)
+        try:
+            nodes = json.loads(o.nodes or "[]")
+            edges = json.loads(o.edges or "[]")
+        except Exception:
+            nodes, edges = [], []
+        issues = orchestration_engine.static_warnings(
+            nodes if isinstance(nodes, list) else [],
+            edges if isinstance(edges, list) else [],
+            await _tasks_of(o.device_id or ""))
+        card["issues"] = issues
+        card["has_issue"] = bool(issues)
+        cards.append(card)
+    return {"items": cards, "total": len(cards)}
 
 
 @router.post("")
@@ -53,7 +80,8 @@ async def create_orchestration(payload: OrchestrationPayload, db: AsyncSession =
     o = OrchestrationTaskORM(
         id=f"orch-{uuid.uuid4()}",
         name=payload.name.strip(),
-        status="enabled" if payload.status == "enabled" else "stopped",
+        # 默认开启：只有显式传 stopped 才停用（前端编辑器也默认勾选「启用」）
+        status="stopped" if payload.status == "stopped" else "enabled",
         device_id=payload.device_id or "",
         nodes=json.dumps([n.dict() for n in payload.nodes], ensure_ascii=False),
         edges=json.dumps([e.dict() for e in payload.edges], ensure_ascii=False),
@@ -134,8 +162,8 @@ async def update_orchestration(orch_id: str, payload: OrchestrationPayload, db: 
         raise HTTPException(status_code=400, detail="编排任务名称不能为空")
     o.name = payload.name.strip()
     o.device_id = payload.device_id or ""
-    if payload.status in ("enabled", "stopped"):
-        o.status = payload.status
+    # 编辑保存时默认开启：仅当显式传 stopped 才停用
+    o.status = "stopped" if payload.status == "stopped" else "enabled"
     o.nodes = json.dumps([n.dict() for n in payload.nodes], ensure_ascii=False)
     o.edges = json.dumps([e.dict() for e in payload.edges], ensure_ascii=False)
     o.updated_at = _now_ms()

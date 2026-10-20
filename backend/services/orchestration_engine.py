@@ -840,6 +840,67 @@ async def run_all_enabled() -> Dict[str, int]:
     return out
 
 
+def static_warnings(nodes: list, edges: list, device_tasks: Optional[list] = None) -> List[str]:
+    """纯静态校验：只看画布结构与配置，不查告警数据、不碰设备。
+
+    抽成公共函数的用途：
+    - 「校验」接口（diagnose_orchestration）用它给出连线问题；
+    - 编排列表用它给卡片打「异常」标记；
+    两处共用同一份规则，避免"校验说有问题、卡片却显示正常"这种漂移。
+
+    判定为异常的情形：
+    - 逻辑元件没有上游 / 多路算子只有单输入（恒成立）
+    - 输出元件接了多个上游（只取第一个命中，其余分支形同虚设）
+    - 算法元件未绑定算法
+    - 任务元件关联的 task_id 不在设备快照里（设备未同步或任务已删除）
+    - 整张图没有输出元件（不会产出业务预警）
+    """
+    nodes = nodes or []
+    edges = edges or []
+    if not nodes:
+        return ["编排图为空，请先添加元件并连线。"]
+    node_by_id, _, parents_of = build_graph(nodes, edges)
+    warnings: List[str] = []
+    for n in nodes:
+        ins = parents_of.get(n["id"], [])
+        cfg = n.get("config") or {}
+        lb = _node_label(n)
+        if n["type"] == "logic":
+            key = _logic_key(cfg)
+            if not ins:
+                warnings.append(f"「{lb}」没有任何上游输入，不会参与判断。")
+            elif key in ("logic_and", "logic_vote") and len(ins) < 2:
+                warnings.append(
+                    f"「{lb}」只有 {len(ins)} 个上游输入：{key} 是「多路」校验算子，"
+                    "单输入时会恒成立（等于没校验）。请把其余分支也连到本元件。")
+        if n["type"] == "output" and len(ins) > 1:
+            others = "、".join(_node_label(node_by_id[p]) for p in ins[1:] if p in node_by_id)
+            warnings.append(
+                f"「{lb}」接了 {len(ins)} 个上游：输出元件只取「第一个命中」的上游（{_node_label(node_by_id[ins[0]])}），"
+                f"其余分支（{others}）不会参与判断。请先把所有分支汇入逻辑元件，再连到输出元件。")
+        if n["type"] == "algo" and not ins and not _match_event_keys_for_algo(cfg):
+            warnings.append(f"「{lb}」未绑定算法。")
+        if n["type"] == "task" and device_tasks is not None:
+            info = _task_info(device_tasks, cfg.get("task_id"))
+            if not info["found"]:
+                warnings.append(
+                    f"「{lb}」关联的任务 {cfg.get('task_id')} 不在设备快照中"
+                    "（设备未同步或任务已被删除），该分支永远不会命中。")
+    if nodes and not any(n.get("type") == "output" for n in nodes):
+        warnings.append("图里没有输出元件，不会产出业务预警。")
+    return warnings
+
+
+async def orchestration_issues(orch) -> List[str]:
+    """编排卡片的「异常」判定：静态校验（会带设备快照里的任务存在性检查）。"""
+    nodes = _json(orch.nodes) or []
+    edges = _json(orch.edges) or []
+    if not nodes:
+        return ["编排图为空，请先添加元件并连线。"]
+    device_tasks, _ = await _load_device_context(orch)
+    return static_warnings(nodes, edges, device_tasks)
+
+
 async def diagnose_orchestration(orch, hours: int = 24) -> dict:
     """「校验」：按编排图逐节点求值并回显命中情况与未命中原因。
 
@@ -892,27 +953,8 @@ async def diagnose_orchestration(orch, hours: int = 24) -> dict:
             "parents": parents_of.get(n["id"], []), "detail": extra,
         })
 
-    # ── 静态连线校验（不依赖数据，直接指出画布结构问题）──
-    warnings: List[str] = []
-    for n in nodes:
-        ins = parents_of.get(n["id"], [])
-        cfg = n.get("config") or {}
-        lb = _node_label(n)
-        if n["type"] == "logic":
-            key = _logic_key(cfg)
-            if not ins:
-                warnings.append(f"「{lb}」没有任何上游输入，不会参与判断。")
-            elif key in ("logic_and", "logic_vote") and len(ins) < 2:
-                warnings.append(
-                    f"「{lb}」只有 {len(ins)} 个上游输入：{key} 是「多路」校验算子，"
-                    "单输入时会恒成立（等于没校验）。请把其余分支也连到本元件。")
-        if n["type"] == "output" and len(ins) > 1:
-            others = "、".join(_node_label(node_by_id[p]) for p in ins[1:] if p in node_by_id)
-            warnings.append(
-                f"「{lb}」接了 {len(ins)} 个上游：输出元件只取「第一个命中」的上游（{_node_label(node_by_id[ins[0]])}），"
-                f"其余分支（{others}）不会参与判断。请先把所有分支汇入逻辑元件，再连到输出元件。")
-        if n["type"] == "algo" and not ins and not _match_event_keys_for_algo(cfg):
-            warnings.append(f"「{lb}」未绑定算法。")
+    # ── 静态连线校验（与卡片「异常」标记共用 static_warnings，规则只有一份）──
+    warnings: List[str] = static_warnings(nodes, edges, device_tasks)
 
     return {
         "orchestration_id": orch.id,
