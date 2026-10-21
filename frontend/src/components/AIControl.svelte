@@ -39,6 +39,8 @@
         // yoloTarget=面板主目标（决定用哪个阈值字段）；yoloTargets=设备目标类型ID多选，下发为 target_types
         yoloTarget: 'human', yoloTargets: ['PERSON'],
         yoloHumanThresh: 0.31, yoloVehicleThresh: 0.32, yoloNonMotorThresh: 0.37,
+    // 按检测目标分别配置的阈值 {目标类型ID: 阈值}；三阈值字段保留作兼容/回填来源
+    thresholds: {},
         intrusionDuration: 3, alarmInterval: 10,
         cropUp: 0.5, cropDown: 0.3, cropLeft: 0.4, cropRight: 0.6,
         // 目标大小（面板 0~100 百分比，下发时折算成设备 targetMax/targetMin 的 0~1）：最小 0~100、最大 50~100
@@ -236,28 +238,53 @@
     $: personCountInfo = personCountMeta(activeAlgorithm?.event_type || config.event_type);
 
     // ── 检测目标（设备 targetTypes）：支持多目标勾选 ───────────────────────
-    // 选项优先取算法目录里该算法自带的 targetTypes（设备真实能力），取不到时用通用兜底集。
-    const TARGET_TYPE_LABELS = { PERSON: '人员 (人体检测)', VEHICLE: '车辆', NON_MOTOR: '非机动车', NONMOTOR: '非机动车', FACE: '人脸' };
-    const FALLBACK_TARGET_TYPES = ['PERSON', 'VEHICLE', 'NON_MOTOR'];
-    const YOLO_TO_TARGET = { human: 'PERSON', vehicle: 'VEHICLE', any: 'NON_MOTOR' };
-    const targetTypeLabel = (t) => TARGET_TYPE_LABELS[String(t || '').toUpperCase()] || t;
-    // 设备目标类型ID → 面板主目标标识（与后端 _target_type_to_yolo 对齐）
-    const targetToYolo = (t) => {
-        const up = String(t || '').toUpperCase();
-        return up === 'PERSON' ? 'human' : up === 'VEHICLE' ? 'vehicle' : 'any';
+    // 每个算法**能选哪些目标由设备算法目录的 targetTypes 决定**（实测：
+    //   车辆禁停 PARK → ['CAR','CYCLE']；人员超员 PERSON_OVER_QUERYING → ['PERSON']；
+    //   车辆离开 EXIT → ['PERSON','CAR','CYCLE']）。
+    // 曾经的错：把「已选目标」无条件并进选项，于是把上一个算法的 PERSON 带进「车辆禁停」，
+    // 界面就出现了该算法根本不支持的 PERSON。现在只有设备没给集合（离线快照）时才并入。
+    // 元数据同时给出该目标对应的阈值字段（human/vehicle/any，与后端 _target_type_to_yolo 对齐）。
+    const TARGET_TYPE_META = {
+        PERSON:        { label: '人员 (人体检测)', yolo: 'human' },
+        FACE:          { label: '人脸',            yolo: 'human' },
+        CAR:           { label: '机动车',          yolo: 'vehicle' },
+        VEHICLE:       { label: '车辆',            yolo: 'vehicle' },
+        CYCLE:         { label: '非机动车',        yolo: 'any' },
+        NON_MOTOR:     { label: '非机动车',        yolo: 'any' },
+        NONMOTOR:      { label: '非机动车',        yolo: 'any' },
+        ELECTRIC_BIKE: { label: '电动车',          yolo: 'any' },
     };
-    // 当前算法可选目标类型：目录行的 targetTypes 优先，缺失（离线快照）用兜底集
-    $: targetTypeOptions = (() => {
+    const FALLBACK_TARGET_TYPES = ['PERSON', 'CAR', 'CYCLE'];
+    const YOLO_TO_TARGET = { human: 'PERSON', vehicle: 'CAR', any: 'CYCLE' };
+    const targetUp = (t) => String(t || '').toUpperCase();
+    const targetTypeLabel = (t) => TARGET_TYPE_META[targetUp(t)]?.label || t;
+    // 设备目标类型ID → 面板主目标标识（决定取哪条阈值）
+    const targetToYolo = (t) => TARGET_TYPE_META[targetUp(t)]?.yolo || 'any';
+
+    // 当前算法允许的目标集合（设备目录 targetTypes，大写去重）
+    $: allowedTargets = (() => {
         const hit = availableAlgorithms.find((a) => algoOptionKey(a) === algoItemKey(activeAlgorithm));
-        const list = (hit?.targetTypes || []).filter(Boolean);
-        const base = list.length ? list : FALLBACK_TARGET_TYPES;
-        // 已选但目录里没有的目标（设备原值）也要出现在下拉里，否则会被静默丢弃
-        return [...new Set([...base, ...selectedTargets])];
+        return [...new Set((hit?.targetTypes || []).map(targetUp).filter(Boolean))];
     })();
     // 已勾选目标：老配置只有单值 yoloTarget 时按它推导，保证回填不丢
     $: selectedTargets = (Array.isArray(config.yoloTargets) && config.yoloTargets.length)
         ? config.yoloTargets
         : [YOLO_TO_TARGET[config.yoloTarget] || 'PERSON'];
+    // 下拉选项：算法有明确集合时**只给集合内的**；设备没给（离线快照）时才用兜底集 + 已选值
+    $: targetTypeOptions = allowedTargets.length
+        ? allowedTargets
+        : [...new Set([...FALLBACK_TARGET_TYPES, ...selectedTargets.map(targetUp)])];
+    // 切换算法后收敛已选目标：剔掉不属于当前算法的（例如把「超员」的 PERSON 带到「车辆禁停」）。
+    // 注意：必须放进函数里再调用 —— Svelte 的响应式依赖分析只看语句里直接出现的变量名，
+    // 看不到函数体内部的 config/allowedTargets，否则会报 isAgentTask→config→allowedTargets→activeAlgorithm 循环依赖。
+    function ensureTargetsAllowed() {
+        if (!allowedTargets.length) return;
+        const kept = selectedTargets.filter((t) => allowedTargets.includes(targetUp(t)));
+        if (kept.length === selectedTargets.length) return;      // 都在允许集合内，什么都不做
+        const next = kept.length ? kept : [allowedTargets[0]];   // 全被剔掉时落到该算法首个目标
+        config = { ...config, yoloTargets: next, yoloTarget: targetToYolo(next[0]) };
+    }
+    $: if (allowedTargets.length) ensureTargetsAllowed();
     let targetPickerOpen = false;
     // 下拉面板的展开方向/最大高度按按钮在视口中的实际可用空间计算：
     // 该控件位于第三步面板底部，固定「向下 + max-h-44」时会被外层滚动容器裁掉，导致选项看不全。
@@ -297,6 +324,39 @@
     const taskStatusClass = (st) => TASK_STATUS_CLASS[st] || TASK_STATUS_CLASS['未启用'];
 
     // 阈值滑杆：只改「当前检测目标」对应的那一个阈值字段，其余字段保持设备原值（回填 round-trip 不丢）
+    // ── 按目标阈值：每个已选检测目标一个独立的阈值 ───────────────────────
+    // 设备原生支持：同一规则的 extendParams.threshold 用 {eventType__目标后缀} 表达每个目标的阈值
+    // （真实报文 EXIT → {"EXIT__VEHICLE":.., "EXIT__BODY":.., "EXIT__CYCLE":..}），
+    // 后端 task_builders.build_threshold_dict 负责组装。
+    const LEGACY_THRESH_BY_YOLO = { human: 'yoloHumanThresh', vehicle: 'yoloVehicleThresh', any: 'yoloNonMotorThresh' };
+    // 某目标当前生效的阈值：
+    //   ① thresholds[目标]（后端按设备 threshold 字典逆映射而来，最权威）
+    //   ② 该目标同类的旧字段（仅当它被显式赋过值，即不同于 defaultConfig 的默认值）
+    //   ③ 主阈值 config[threshKey]（设备规则常是「一个阈值给所有目标」，用它最接近）
+    //   —— 不能直接按类别回落到旧字段：PARK 只有 vehicle 字段被赋值时，
+    //      CYCLE 会误取到「非机动车默认值 0.37」，看上去就和设备不一致了。
+    function targetThreshold(t) {
+        const up = targetUp(t);
+        const map = config.thresholds || {};
+        if (map[up] !== undefined && map[up] !== null) return Number(map[up]);
+        const legacyKey = LEGACY_THRESH_BY_YOLO[targetToYolo(up)];
+        const legacyVal = config[legacyKey];
+        if (legacyVal !== undefined && legacyVal !== null && Number(legacyVal) !== Number(defaultConfig[legacyKey])) {
+            return Number(legacyVal);
+        }
+        const main = config[threshKey];
+        return Number(main ?? legacyVal ?? 0.3);
+    }
+    // 改某目标的阈值：写进 thresholds，同时同步旧字段（主目标仍读旧字段的下游逻辑不受影响）
+    function setTargetThreshold(t, v) {
+        const up = targetUp(t);
+        const num = Math.min(0.9, Math.max(0.1, Number(v) || 0.1));
+        const val = +num.toFixed(2);
+        const map = { ...(config.thresholds || {}), [up]: val };
+        const legacyKey = LEGACY_THRESH_BY_YOLO[targetToYolo(up)] || 'yoloHumanThresh';
+        config = { ...config, thresholds: map, [legacyKey]: val };
+    }
+
     function setThresh(v) {
         const num = Math.min(0.9, Math.max(0.1, Number(v) || 0.1));
         config = { ...config, [threshKey]: +num.toFixed(2) };
@@ -832,6 +892,7 @@
             yoloTargets: [...defaultConfig.yoloTargets],
             yoloHumanThresh: defaultConfig.yoloHumanThresh, yoloVehicleThresh: defaultConfig.yoloVehicleThresh,
             yoloNonMotorThresh: defaultConfig.yoloNonMotorThresh,
+            thresholds: {},
             intrusionDuration: defaultConfig.intrusionDuration, alarmInterval: defaultConfig.alarmInterval,
             // 人员数量：仅超员/少员算法会用到并下发，其余算法该值闲置
             objCount: defaultConfig.objCount,
@@ -1065,7 +1126,7 @@
 
     // 面板三列参数（Phase 1 绑顶层 config）对应的键：多算法回填时把当前算法项的这些参数提到顶层，
     // 使单算法面板显示/编辑的是「当前算法」的真实值（下发时当前项也回读顶层，保持一致）。
-    const PANEL_PARAM_KEYS = ['maxTarget', 'minTarget', 'yoloHumanThresh', 'yoloVehicleThresh',
+    const PANEL_PARAM_KEYS = ['maxTarget', 'minTarget', 'thresholds', 'yoloHumanThresh', 'yoloVehicleThresh',
         'yoloNonMotorThresh', 'yoloTarget', 'yoloTargets', 'intrusionDuration', 'alarmInterval',
         'cropUp', 'cropDown', 'cropLeft', 'cropRight', 'objCount', 'prompt', 'agentType', 'analysisMode'];
     function hoistItemParams(item) {
@@ -1407,6 +1468,9 @@
                 version: item.version || config.version || 'V2.0.0',
                 target_types,
                 threshold: Number(activeThresh),
+                // 按目标阈值（只发已选目标；多目标且不同值时后端按目标拆规则）
+                thresholds: Object.fromEntries(target_types.map((t) => [String(t).toUpperCase(),
+                    Number((p.thresholds || config.thresholds || {})[String(t).toUpperCase()] ?? activeThresh)])),
                 // 目标大小：面板 0~100(画面占比百分比) → 设备 targetMax/targetMin 的 0~1，保留两位小数
                 target_max: toTargetSize(p.maxTarget, 100),
                 target_min: toTargetSize(p.minTarget, 0),
@@ -2518,10 +2582,33 @@
                                     <input type="number" min="50" max="100" step="1" bind:value={config.maxTarget} class="w-full bg-slate-950 border border-slate-800 text-amber-400 rounded p-1.5 focus:border-amber-500 text-[11px] font-mono text-center" />
                                 </div>
                             </div>
-                            <!-- 设备侧一条规则只有一个 threshold：按「主目标」(已勾选的第一个)取对应阈值字段 -->
+                            <!-- 检测阈值：每个已选检测目标一条独立阈值。
+                                 设备原生支持在同一规则里按目标配阈值（threshold 的键为 {eventType}__{目标}），
+                                 后端 build_threshold_dict 会按真实格式组装，不需要拆规则。 -->
                             <div>
-                                <div class="flex justify-between items-center mb-1 text-[10px]"><label class="text-slate-400">检测阈值</label><span class="font-mono text-amber-400">{config[threshKey]}</span></div>
-                                <input type="range" min="0.1" max="0.9" step="0.01" value={config[threshKey]} on:input={(e) => setThresh(e.target.value)} class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                                <div class="flex justify-between items-center mb-1 text-[10px]">
+                                    <label class="text-slate-400">检测阈值（按目标分别配置）</label>
+                                    <span class="text-[9px] text-slate-500">{selectedTargets.length} 个目标</span>
+                                </div>
+                                <div class="space-y-2">
+                                    {#each selectedTargets as tt}
+                                        <div class="flex items-center gap-2">
+                                            <span class="w-24 shrink-0 text-[10px] text-slate-300 truncate" title={targetTypeLabel(tt)}>{targetTypeLabel(tt)}</span>
+                                            <input type="range" min="0.1" max="0.9" step="0.01"
+                                                   value={targetThreshold(tt)}
+                                                   on:input={(e) => setTargetThreshold(tt, e.target.value)}
+                                                   class="flex-1 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                                            <span class="w-10 text-right font-mono text-[10px] text-amber-400">{targetThreshold(tt).toFixed(2)}</span>
+                                        </div>
+                                    {:else}
+                                        <p class="text-[10px] text-slate-500">请先勾选检测目标。</p>
+                                    {/each}
+                                </div>
+                                {#if selectedTargets.length > 1}
+                                    <p class="text-[9px] text-slate-500 mt-1 leading-relaxed">
+                                        下发时每个目标的阈值会写进同一规则的 threshold（键形如 EXIT__VEHICLE / EXIT__BODY）。
+                                    </p>
+                                {/if}
                             </div>
                             <!-- 检测目标：多目标勾选（设备 targetTypes）；首个勾选项即主目标，决定上面用哪条阈值 -->
                             <div>

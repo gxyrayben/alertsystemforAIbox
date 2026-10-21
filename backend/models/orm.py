@@ -21,6 +21,10 @@ class DeviceORM(Base):
     available_algorithms = Column(String, default="[]")
     algorithms_ability = Column(String, default="[]")
     agents = Column(String, default="[]")  # 设备侧智能体算法快照（JSON 字符串），随设备详情同步
+    # 最近一次成功从设备拉到的算法目录（含每个算法的 targetTypes 目标类型），JSON 字符串。
+    # 设备离线/拉取失败时靠它仍能给出正确的「检测目标」集合，
+    # 否则面板会退化成通用兜底集（例如给「车辆禁停」显示出 PERSON）。
+    algorithm_catalog = Column(String, default="[]")
 
 class AlertORM(Base):
     __tablename__ = "alerts"

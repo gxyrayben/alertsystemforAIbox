@@ -705,12 +705,14 @@ class DeviceService:
         # 第二步：逐仓组装 rulesParams → 下发一条 monitor（仓序号 seq 决定各自的 monitor_id）
         failed: List[str] = []
         for seq, (cabin, group) in enumerate(groups.items(), start=1):
+            # 一个算法一条规则；多目标阈值写在同一条规则的 threshold 字典里（{eventType__后缀: 值}）
             rules = [
                 task_builders.build_rule(
                     event_type=algo.get("event_type"),
                     area=algo.get("area"),
                     target_types=algo.get("target_types"),
                     threshold=algo.get("threshold", 0.3),
+                    thresholds=algo.get("thresholds"),
                     target_max=algo.get("target_max", 1),
                     target_min=algo.get("target_min", 0),
                     duration=algo.get("duration", 3),
@@ -887,12 +889,14 @@ class DeviceService:
         allocated = list(existing)
         failed: List[str] = []
         for cabin, group in groups.items():
+            # 一个算法一条规则；多目标阈值写在同一条规则的 threshold 字典里（{eventType__后缀: 值}）
             rules = [
                 task_builders.build_rule(
                     event_type=algo.get("event_type"),
                     area=algo.get("area"),
                     target_types=algo.get("target_types"),
                     threshold=algo.get("threshold", 0.3),
+                    thresholds=algo.get("thresholds"),
                     target_max=algo.get("target_max", 1),
                     target_min=algo.get("target_min", 0),
                     duration=algo.get("duration", 3),

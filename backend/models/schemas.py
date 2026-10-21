@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 class Device(BaseModel):
     id: Optional[str] = None
@@ -70,6 +70,10 @@ class SmallModelTaskDeploy(BaseModel):
     algo_cabin_name: str
     version: str = "V2.0.0"
     target_types: Optional[List[str]] = None
+    # 按【检测目标】分别配置的阈值：{目标类型ID: 阈值}，如 {"CAR": 0.45, "CYCLE": 0.6}。
+    # 设备侧一条规则只有一个阈值（threshold 的键是 eventType），故多目标且阈值不同时
+    # 会按目标拆成多条规则（每条 targetTypes=[该目标]），见 task_builders.build_rules_for_algorithm。
+    thresholds: Optional[Dict[str, float]] = None
     threshold: float = 0.3
     # 目标大小=目标框占画面比例，设备口径 0~1（两位小数）；面板 0~100 由前端折算后传入
     target_max: float = 1.0
@@ -118,6 +122,10 @@ class WarehouseAlgorithmItem(BaseModel):
     version: str = "V2.0.0"
     target_types: Optional[List[str]] = None
     threshold: float = 0.3
+    # 按【检测目标】分别配置的阈值：{目标类型ID: 阈值}，如 {"CAR": 0.45, "CYCLE": 0.6}。
+    # 设备侧一条规则只有一个阈值（threshold 的键是 eventType），故多目标且阈值不同时，
+    # 下发会按目标拆成多条规则（每条 targetTypes=[该目标]），见 task_builders.build_rules_for_algorithm。
+    thresholds: Optional[Dict[str, float]] = None
     # 目标大小=目标框占画面比例，设备口径 0~1（两位小数）；面板 0~100 由前端折算后传入
     target_max: float = 1.0
     target_min: float = 0.0

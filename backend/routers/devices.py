@@ -19,7 +19,7 @@ from services.crud import get_or_404
 router = APIRouter(prefix="/devices", tags=["devices"])
 
 # 由客户端提交、但由系统内部管理（不可直接写入）的字段
-_MANAGED_FIELDS = {"id", "channels", "device_tasks", "available_algorithms", "algorithms_ability","status", "session_id", "agents"}
+_MANAGED_FIELDS = {"id", "channels", "device_tasks", "available_algorithms", "algorithms_ability","status", "session_id", "agents", "algorithm_catalog"}
 
 _AGENT_TIMEOUT = 15.0
 
@@ -130,9 +130,21 @@ async def list_device_algorithms(device_id: str, refresh: bool = Query(True), db
     if refresh:
         async with DeviceService.new_client(device_obj, timeout=_AGENT_TIMEOUT) as client:
             rows, err = await DeviceService.list_algorithm_rows(client, device_obj, db)
+        if rows:
+            # 成功拿到「带 targetTypes 的实时目录」→ 缓存，供设备离线/拉取失败时复用
+            device_obj.algorithm_catalog = json.dumps(rows, ensure_ascii=False)
+            await db.commit()
     fallback = False
-    if not rows:  # 离线/未刷新 → 快照兜底，保证面板下拉不空
-        rows = algorithm_rows_from_ability(json.loads(device_obj.algorithms_ability or "[]"))
+    if not rows:
+        # 优先用上次成功的实时目录（含各算法的目标类型），再退到能力集拍平（无目标类型）
+        try:
+            cached = json.loads(device_obj.algorithm_catalog or "[]")
+        except (TypeError, ValueError):
+            cached = []
+        if isinstance(cached, list) and cached:
+            rows = cached
+        else:
+            rows = algorithm_rows_from_ability(json.loads(device_obj.algorithms_ability or "[]"))
         fallback = True
     return {"count": len(rows), "algorithms": rows, "fallback": fallback, "message": err or ""}
 
@@ -231,6 +243,8 @@ async def _enrich_warehouse_algorithms(
                                 item.areaName or "检测区", item.areaType or "POLYGON"),
             "target_types": item.target_types,
             "threshold": item.threshold,
+            # 按目标阈值（多目标可分阈值）；为空时由 build_rule 退回单一 threshold
+            "thresholds": item.thresholds,
             "target_max": item.target_max,
             "target_min": item.target_min,
             "duration": item.duration,

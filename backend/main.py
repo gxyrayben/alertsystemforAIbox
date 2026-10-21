@@ -67,6 +67,9 @@ async def lifespan(app: FastAPI):
             await conn.execute(text("ALTER TABLE devices ADD COLUMN agents TEXT DEFAULT '[]'"))
         if "algorithms_ability" not in dev_cols:
             await conn.execute(text("ALTER TABLE devices ADD COLUMN algorithms_ability TEXT DEFAULT '[]'"))
+        # 兼容旧库：devices 表补充算法目录缓存列（含每个算法的目标类型，离线时也能给出正确的检测目标）
+        if "algorithm_catalog" not in dev_cols:
+            await conn.execute(text("ALTER TABLE devices ADD COLUMN algorithm_catalog TEXT DEFAULT '[]'"))
         # 兼容旧库：devices 表补充接入协议与设备证书校验开关（HTTPS 支持）
         if "protocol" not in dev_cols:
             await conn.execute(text("ALTER TABLE devices ADD COLUMN protocol VARCHAR DEFAULT 'http'"))

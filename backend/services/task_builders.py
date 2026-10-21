@@ -396,6 +396,7 @@ def build_rule(
     area: Optional[dict] = None,
     target_types: Optional[List[str]] = None,
     threshold: float = 0.3,
+    thresholds: Optional[dict] = None,
     target_max: float = 1.0,
     target_min: float = 0.0,
     duration: int = 3,
@@ -415,16 +416,21 @@ def build_rule(
     target_expand / target_thresholds 三个字段放进 agentLLMParam【内】（设备真实格式，见下方注释）。
     ruleId 由 build_warehouse_monitor 统一重排为 1..N，
     ruleCustomName 同样由其统一赋为 str(monitor_id)（本函数只产出与 monitor 无关的字段）。
-    threshold 入参为【标量】，下发时按设备格式包成 {eventType: 值}（传字典则原样透传）。
+    threshold 入参为【标量】主阈值；thresholds 为 {目标类型: 阈值}（多目标分别配置）。
+    二者按设备真实格式合并成 threshold 字典：单目标 {eventType: 值}、多目标 {eventType__后缀: 值}。
     target_max/target_min 为【目标大小】，设备口径 0~1 两位小数（面板 0~100 由 target_size 折算）。
     obj_count 为【人员数量】，仅超员/少员算法有意义：写入 extendParams.custom.<键>.objCount（0~100）；
     custom 用于沿用设备侧已有的其他 custom 子键（改任务时先读回再重建，避免把未知字段抹掉）。
     """
     area = round_area(area) or full_frame_area()
     target_types = target_types or ["PERSON"]
-    # 设备侧 threshold 是按事件类型分别配置的字典（一条规则一个 eventType，故只有一项）；
-    # 『小+大』的 agentLLMParam.target_thresholds 与它【同源】：同一份阈值在规则里出现两处。
-    threshold_dict = threshold if isinstance(threshold, dict) else {event_type: threshold}
+    # 设备真实格式：单目标 {eventType: 值}；多目标 {eventType__后缀: 值}（每个目标一个阈值）。
+    # 传了字典则原样透传（调用方已构造好多目标形式）。
+    # 『小+大』的 agentLLMParam.target_thresholds 与它同源：同一份阈值在规则里出现两处。
+    if isinstance(threshold, dict):
+        threshold_dict = threshold
+    else:
+        threshold_dict = build_threshold_dict(event_type, target_types, threshold, thresholds)
     extend_params = {
         "targetMax": target_size(target_max, 1),
         "targetMin": target_size(target_min, 0),
@@ -462,17 +468,98 @@ def build_rule(
     }
 
 
+# ── 按目标阈值的设备真实格式 ────────────────────────────────────────────
+# 设备在【同一条规则】里就能表达「每个目标各自的阈值」，threshold 字典的键是
+# `{eventType}__{目标后缀}`（键大写）。真实报文示例（eventType=EXIT）：
+#   "targetTypes": ["CAR", "CYCLE", "PERSON"],
+#   "threshold": {"EXIT__CYCLE": 0.35613, "EXIT__BODY": 0.5073, "EXIT__VEHICLE": 0.43135}
+# 可见后缀是「人/车/非机动车」这组展示分类，而不是 targetTypes 的原值：
+#   CAR→VEHICLE、PERSON→BODY、CYCLE→CYCLE
+# 单目标时设备只写一个 `{eventType: 值}`（如 {"PERSON_OVER_QUERYING": 0.64}）。
+TARGET_THRESHOLD_SUFFIX = {
+    "CAR": "VEHICLE",
+    "VEHICLE": "VEHICLE",
+    "PERSON": "BODY",
+    "BODY": "BODY",
+    "CYCLE": "CYCLE",
+    "NON_MOTOR": "CYCLE",
+    "NONMOTOR": "CYCLE",
+    "ELECTRIC_BIKE": "CYCLE",
+}
+SUFFIX_TO_TARGET = {"VEHICLE": "CAR", "BODY": "PERSON", "CYCLE": "CYCLE"}
+
+
+def target_threshold_suffix(target_type: str) -> str:
+    """目标类型 → 阈值字典里的键后缀（未知类型原样大写）。"""
+    up = str(target_type or "").upper()
+    return TARGET_THRESHOLD_SUFFIX.get(up, up)
+
+
+def build_threshold_dict(event_type: str, target_types: Optional[List[str]],
+                         threshold: float = 0.3,
+                         thresholds: Optional[dict] = None) -> dict:
+    """按目标阈值 → 设备 threshold 字典。
+
+    - 单目标：`{eventType: 值}`（与设备现有单目标规则一致）；
+    - 多目标：每个目标一个键 `{eventType}__{后缀}`，值取 thresholds[该目标] 或缺省 threshold。
+    """
+    targets = [str(t).upper() for t in (target_types or ["PERSON"]) if t] or ["PERSON"]
+    th_map = {str(k).upper(): float(v) for k, v in (thresholds or {}).items() if v is not None}
+    if len(targets) == 1:
+        return {event_type: th_map.get(targets[0], threshold)}
+    return {f"{event_type}__{target_threshold_suffix(t)}": th_map.get(t, threshold) for t in targets}
+
+
+def thresholds_from_extend(extend_params: Optional[dict], event_type: Optional[str]) -> dict:
+    """设备 threshold 字典 → 面板 {目标类型: 阈值}（build_threshold_dict 的逆映射）。
+
+    兼容两种写法：
+    - 单键 `{eventType: v}`   → 该规则所有目标共用 v；
+    - 多键 `{eventType__后缀: v}` → 按后缀反解目标类型（VEHICLE→CAR / BODY→PERSON / CYCLE→CYCLE）。
+    """
+    th = (extend_params or {}).get("threshold")
+    if not isinstance(th, dict):
+        return {}
+    targets = [str(t).upper() for t in ((extend_params or {}).get("targetTypes") or [])]
+    out: dict = {}
+    prefix = f"{event_type}__" if event_type else None
+    for key, value in th.items():
+        k = str(key)
+        if event_type and k == event_type:
+            for t in (targets or ["PERSON"]):
+                out[t] = value
+        elif prefix and k.startswith(prefix):
+            t = SUFFIX_TO_TARGET.get(k[len(prefix):].upper())
+            if t:
+                out[t] = value
+    return out
+
+
 def rule_threshold(extend_params: Optional[dict], event_type: Optional[str] = None,
                    default: float = 0.3):
-    """从规则 extendParams 读出【标量】阈值（build_rule 的 threshold 逆映射）。
+    """从规则 extendParams 读出【标量】阈值（主目标阈值，供面板单值字段回填）。
 
-    设备侧 threshold 形如 {"FALL": 0.97}：优先取与 event_type 同名的项，取不到则取首项；
-    历史/异常数据里若仍是标量则原样返回。全部取不到时回落 default。
+    threshold 可能是：`{eventType: 0.97}`、`{eventType__BODY: 0.5, ...}`（按目标）、或历史标量。
+    优先取与 event_type 同名的项；多目标时取【主目标 targetTypes[0] 对应后缀】的那一项；
+    再退回首个 `eventType__*` 项；再取首项；都没有回落 default。
     """
     th = (extend_params or {}).get("threshold")
     if isinstance(th, dict):
         if event_type is not None and event_type in th:
             return th.get(event_type)
+        if event_type is not None:
+            # 多目标时按【主目标】(targetTypes[0]) 的键后缀取值。
+            # 不能取"第一个 __ 键"：设备字典顺序不保证，PARK 会把 CYCLE 的值
+            # 写进面板的「机动车阈值」字段（真机已踩到，界面因此与设备不一致）。
+            targets = [str(t).upper() for t in (extend_params.get("targetTypes") or [])]
+            if targets:
+                primary_key = f"{event_type}__{target_threshold_suffix(targets[0])}"
+                if primary_key in th:
+                    return th.get(primary_key)
+            prefix = f"{event_type}__"
+            for key, value in th.items():
+                if str(key).startswith(prefix):
+                    return value
         for value in th.values():
             return value
         return default
@@ -652,15 +739,25 @@ def build_agent_llm_param(agent: dict, prompt: Optional[str] = None,
     }
 
 
+# 设备目标类型 → 面板主目标（决定用哪条阈值字段）。
+# 注意设备实际用的是 CAR/CYCLE（机动车/非机动车），不是 VEHICLE/NON_MOTOR：
+# 早期只认 PERSON/VEHICLE，导致 CAR 落到 else 分支 → 机动车阈值被写进「非机动车」字段。
+_TARGET_YOLO = {
+    "PERSON": "human",
+    "FACE": "human",
+    "CAR": "vehicle",
+    "VEHICLE": "vehicle",
+    "CYCLE": "any",
+    "NON_MOTOR": "any",
+    "NONMOTOR": "any",
+    "ELECTRIC_BIKE": "any",
+}
+
+
 def _target_type_to_yolo(target_types: Optional[List[str]]) -> str:
-    """monitor 的 targetTypes[0] → 面板 yoloTarget（PERSON→human / VEHICLE→vehicle / 其它→any）。"""
+    """monitor 的 targetTypes[0] → 面板 yoloTarget（PERSON/FACE→human、CAR/VEHICLE→vehicle、其它→any）。"""
     first = (target_types or ["PERSON"])[0]
-    up = (first or "").upper()
-    if up == "PERSON":
-        return "human"
-    if up == "VEHICLE":
-        return "vehicle"
-    return "any"
+    return _TARGET_YOLO.get((first or "").upper(), "any")
 
 
 def _thresh_key(target_types: Optional[List[str]]) -> str:
@@ -826,8 +923,13 @@ def monitor_to_panel_config(task: dict, mon: Optional[dict]) -> dict:
         # 面板检测目标支持多选：原样带回设备的 targetTypes
         cfg["yoloTargets"] = list(ep.get("targetTypes") or [])
     if "threshold" in ep:
-        # 设备侧 threshold 为 {eventType: 值} 字典，按 targetTypes 落到对应的面板阈值字段
-        cfg[_thresh_key(ep.get("targetTypes"))] = rule_threshold(ep, rule.get("eventType"))
+        # 设备侧 threshold 为 {eventType: 值} 或 {eventType__后缀: 值}：主阈值落到面板单值字段
+        _thr = rule_threshold(ep, rule.get("eventType"))
+        cfg[_thresh_key(ep.get("targetTypes"))] = _thr
+        # 按目标阈值：逆映射成 {目标类型: 阈值}（后缀 VEHICLE→CAR / BODY→PERSON / CYCLE→CYCLE）
+        _per_target = thresholds_from_extend(ep, rule.get("eventType"))
+        if _per_target:
+            cfg["thresholds"] = _per_target
     # 人数类算法(超员/少员)：把 custom 里的人员数量带回面板，其余算法无此字段
     _obj_count = rule_obj_count(ep, rule.get("eventType"))
     if _obj_count is not None:
@@ -897,7 +999,12 @@ def _rule_to_algorithm(rule: dict, algo_cabin_name: Optional[str], version: str,
         item["yoloTargets"] = list(ep.get("targetTypes") or [])
     if "threshold" in ep:
         # 设备侧 threshold 为 {eventType: 值} 字典，按 targetTypes 落到对应的面板阈值字段
-        item[_thresh_key(ep.get("targetTypes"))] = rule_threshold(ep, rule.get("eventType"))
+        _thr = rule_threshold(ep, rule.get("eventType"))
+        item[_thresh_key(ep.get("targetTypes"))] = _thr
+        # 按目标阈值：逆映射成 {目标类型: 阈值}（后缀 VEHICLE→CAR / BODY→PERSON / CYCLE→CYCLE）
+        _per_target = thresholds_from_extend(ep, rule.get("eventType"))
+        if _per_target:
+            item["thresholds"] = _per_target
     # 人数类算法(超员/少员)：把 custom 里的人员数量带回面板，其余算法无此字段
     _obj_count = rule_obj_count(ep, rule.get("eventType"))
     if _obj_count is not None:
@@ -969,7 +1076,30 @@ def monitors_to_panel_config(task: dict, monitors: Optional[List[dict]]) -> dict
             item = _rule_to_algorithm(rule, cabin, version, rois)
             if item.get("kind") == "combined":
                 mode = "combined"
-            algorithms.append(item)
+            # 同一算法若设备侧存在多条规则（同 eventType，历史/异常数据），回填时合并回一个算法项：
+            # 目标取并集、阈值合并成 {目标: 值}，否则面板会多出重复的算法卡片。
+            prev = next((a for a in algorithms
+                         if a.get("event_type") == item.get("event_type")
+                         and a.get("algo_cabin_name") == item.get("algo_cabin_name")), None)
+            if prev is None:
+                algorithms.append(item)
+            else:
+                targets = list(dict.fromkeys([*(prev.get("yoloTargets") or []), *(item.get("yoloTargets") or [])]))
+                if targets:
+                    prev["yoloTargets"] = targets
+                merged = {**(prev.get("thresholds") or {}), **(item.get("thresholds") or {})}
+                if merged:
+                    prev["thresholds"] = merged
+                # 主目标阈值取合并后首目标的值，保证面板单值字段也不跑偏
+                if targets:
+                    first = str(targets[0]).upper()
+                    if first in merged:
+                        prev[_thresh_key(targets)] = merged[first]
+                if item.get("kind") == "combined" and not prev.get("agent_llm"):
+                    for k in ("agent_id", "event_tag", "prompt", "alarm_type", "alarm_condition",
+                              "filter_enable", "filter_keywords", "target_expand", "analysis_mode"):
+                        if item.get(k) is not None:
+                            prev[k] = item.get(k)
 
     cfg["taskMode"] = mode
     cfg["algorithms"] = algorithms
