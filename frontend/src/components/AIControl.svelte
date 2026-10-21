@@ -1,5 +1,5 @@
 <script>
-    import { onMount, tick } from 'svelte';
+    import { onMount, onDestroy, tick } from 'svelte';
     import LiveStream from './LiveStream.svelte';
     import { showToast, switchTab, chatRequest, selectedDevice, loadDevices } from '../lib/controlStore.js';
     import { apiPost, apiGet, apiPut, apiDelete, API_BASE } from '../lib/api.js';
@@ -74,8 +74,8 @@
     let config = { ...defaultConfig };
     let templateApplied = false;   // true=当前面板参数来自「套用模板」(路径 b/c)，部署时跳过强制 ROI 门禁；手动配置为 false
     let monitorActive = false;
-    let roiDrawActive = false;
     let drawingRoiId = null; // 画布当前正在绘制/续画的检测区 id（与算法无关：先画区域，再在对应关系表里关联算法）
+    let closedRoiId = null;  // 刚闭合（8 点或右键）但仍停在画布上展示的检测区 id：保留画面，下一次点击才开始画新区域
     let sceneImage = null;   // 视频区载入的真实报警大图（绝对 URL），null 时回退占位图
     let roiSvgRef;           // ROI 绘制图层，用于把点击换算成归一化坐标
     let chatScrollRef;
@@ -167,6 +167,7 @@
     $: drawingRoi = (config.rois || []).find((r) => r.id === drawingRoiId) || null;
     // 绘制目标被删除 / 换任务重载配置后不在池中：复位为「待新建」，避免画布指向幽灵区域
     $: if (drawingRoiId && config.rois && !config.rois.some((r) => r.id === drawingRoiId)) drawingRoiId = null;
+    $: if (closedRoiId && config.rois && !config.rois.some((r) => r.id === closedRoiId)) closedRoiId = null;
     // 不变式：ROI 池恒有默认「全屏检测」伪项（任何来源回填后补齐），它是对应关系表的默认关联行
     $: if (config.rois && !config.rois.some((r) => r.id === 'full')) {
         config.rois = [fullRoiItem(), ...config.rois];
@@ -187,10 +188,23 @@
             const key = String(id);
             if (seen.has(key)) continue;
             seen.add(key);
-            out.push({ device_id: id, display_name: `${c.device_name || '通道'}-${id}` });
+            out.push({
+                device_id: id,
+                device_name: c.device_name || '',
+                onlinestatus: String(c.onlinestatus || '').toLowerCase(),
+                proto: c.proto || '',
+                display_name: `${c.device_name || '通道'}-${id}`,
+            });
         }
         return out;
     })();
+
+    // 「设备实况监视」标题：设备名-通道名（如 Dev01-36）
+    $: liveChannel = channelOptions.find((c) => String(c.device_id) === String(config.channel_device_id)) || null;
+    $: monitorLabel = [$selectedDevice?.name || '当前设备', liveChannel?.device_name]
+        .filter(Boolean).join('-');
+    // 通道在线状态：设备对离线通道也会返回（别人的）视频帧，所以必须用快照里的 onlinestatus 判定
+    $: liveChannelOnline = liveChannel ? liveChannel.onlinestatus === 'online' : true;
 
     // 任务列表数据源：设备快照 device_tasks（同步设备时由后端烘焙，含 task_status/task_enable/algorithms_label/detail）
     $: deviceTasks = (() => {
@@ -341,8 +355,8 @@
         config = { ...defaultConfig };
         templateApplied = false;
         monitorActive = false;
-        roiDrawActive = false;
         drawingRoiId = null;
+        closedRoiId = null;
         sceneImage = null;
         showHistory = false;
         convSummary = '';
@@ -377,7 +391,10 @@
     // 优先按方案事件类型(alertType)匹配，无匹配则回退最新任意一条。
     async function loadSceneImage(alertType) {
         const device = $selectedDevice;
-        if (!device?.name) { sceneImage = null; return; }
+        // 先清掉上一个任务的场景图：否则切换任务、新图还没加载完时，
+        // 画面上会短暂（或长期）留着上一个任务的画面，看着像「固定不变」。
+        sceneImage = null;
+        if (!device?.name) return;
         const base = `/alerts?deviceName=${encodeURIComponent(device.name)}`;
         const pickImage = (list) => (list || []).find((a) => a.imageUrl);
         try {
@@ -402,52 +419,154 @@
         }
     }
 
-    // 在报警大图上点击落点，构成检测区(ROI)多边形；坐标归一化到 0~1。
-    // 绘制与算法/智能体【解耦】：直接往画布上点即可，落点写入「当前绘制中的检测区」；
-    // 没有绘制中的区域时自动新建一个「检测区N」池项。区域与算法的关联在下方对应关系表里勾选。
-    function addRoiPoint(ev) {
-        if (!roiDrawActive || !roiSvgRef) return;
+    // ── ROI 绘制：画布点击落点（最多 MAX_ROI_POINTS 个） ───────────────────
+    // 交互（第 2 步）：
+    //   左键点击画面  → 落一个点，写进「当前选中的检测区」；没有选中项时自动新建
+    //   右键          → 闭合当前多边形（≥3 点生效）
+    //   点数达上限    → 自动闭合
+    //   拖拽顶点      → 调整某个点的位置（仅对当前选中的检测区）
+    // 绘制与算法/智能体解耦：先画区域，再在下方对应关系表里勾选关联。
+    const MAX_ROI_POINTS = 8;
+    let roiSeq = 0;                // ROI id 的自增部分：避免同一毫秒内新建撞号
+    let vertexDrag = null;         // { roiId, index } 正在拖拽的顶点
+    let justDragged = false;       // 拖拽结束后的那次 click 不应再落点
+
+    // 把鼠标事件换算成归一化坐标（0~1）
+    function normPoint(ev) {
         const rect = roiSvgRef.getBoundingClientRect();
         const x = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
         const y = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
-        const pt = { x: +x.toFixed(4), y: +y.toFixed(4) };
+        return { x: +x.toFixed(4), y: +y.toFixed(4) };
+    }
+
+    function addRoiPoint(ev) {
+        if (!roiSvgRef) return;
+        // 拖拽收尾的那次补发 click：忽略并复位
+        if (justDragged) { justDragged = false; vertexDrag = null; releaseDragListeners(); return; }
+        // 残留的拖拽态（例如鼠标在窗口外松开、mouseup 丢失）：点击画布说明拖拽已结束，按正常落点处理
+        if (vertexDrag) { vertexDrag = null; releaseDragListeners(); }
+        // 当前区域已闭合：画面继续保留它，但这一击开始画新区域
+        if (closedRoiId && closedRoiId === drawingRoiId) { drawingRoiId = null; closedRoiId = null; }
         let roiId = drawingRoiId;
-        if (!roiId || roiId === 'full' || !(config.rois || []).some((r) => r.id === roiId)) {
+        const exists = (config.rois || []).some((r) => r.id === roiId);
+        if (!roiId || roiId === 'full' || !exists) {
             const n = (config.rois || []).filter((r) => r.id !== 'full').length + 1;
-            roiId = 'roi_' + Date.now();
+            // id 必须唯一：只用 Date.now() 时，同一毫秒内连续新建（右键闭合后立刻点新区域、
+            // 或测试里的快速连点）会撞号，导致 find() 命中旧区域、点数加到错的对象上。
+            roiId = `roi_${Date.now().toString(36)}_${(roiSeq++).toString(36)}`;
             // 新检测区即时拿到任务内唯一的 areaId 与几何类型，随后随算法一起下发给设备
             config.rois = [...(config.rois || []),
                 { id: roiId, name: `检测区${n}`, points: [], areaId: nextAreaId(config.rois), areaType: AREA_TYPE_POLYGON }];
             drawingRoiId = roiId;
         }
-        config.rois = config.rois.map((r) => r.id === roiId ? { ...r, points: [...r.points, pt] } : r);
+        const cur = (config.rois || []).find((r) => r.id === roiId);
+        const pts = (cur?.points || []);
+        if (pts.length >= MAX_ROI_POINTS) {
+            showToast(`单个检测区最多 ${MAX_ROI_POINTS} 个点：请右键闭合，或点「绘制新区域」再画。`, 'warning');
+            return;
+        }
+        const next = [...pts, normPoint(ev)];
+        config.rois = config.rois.map((r) => r.id === roiId ? { ...r, points: next } : r);
+        if (next.length >= MAX_ROI_POINTS) closeRoiPolygon(true);   // 满点数自动闭环
     }
+
+    // 闭合（结束）当前检测区：下一击落点会自动开一块新的；点数不足 3 不闭合
+    function closeRoiPolygon(auto = false) {
+        const roi = (config.rois || []).find((r) => r.id === drawingRoiId);
+        if (!roi || roi.id === 'full') {
+            showToast('画布上还没有正在绘制的检测区，先点击画面落点。', 'info');
+            return false;
+        }
+        const n = (roi.points || []).length;
+        if (n < 3) {
+            showToast(`至少需要 3 个点才能闭合（当前 ${n} 点）。`, 'warning');
+            return false;
+        }
+        // 关键：保持 drawingRoiId 不变，让该区域继续以「当前区域」样式留在画布上（含可拖拽顶点）；
+        // 仅标记为已闭合，下一次点击画布才会开始画新区域。
+        closedRoiId = roi.id;
+        showToast(`「${roi.name}」已闭合（${n} 点）${auto ? '：已达点数上限，自动闭环' : ''}，可继续拖动顶点微调。`, 'success');
+        return true;
+    }
+
+    // 右键闭环
+    function onRoiContextMenu(ev) {
+        ev.preventDefault();
+        closeRoiPolygon();
+    }
+
+    // ── 顶点拖拽 ──
+    function releaseDragListeners() {
+        window.removeEventListener('mousemove', onVertexDragMove);
+        window.removeEventListener('mouseup', endVertexDrag);
+        window.removeEventListener('blur', endVertexDrag);
+    }
+
+    function startVertexDrag(ev, index) {
+        if (!drawingRoiId || drawingRoiId === 'full') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        vertexDrag = { roiId: drawingRoiId, index };
+        justDragged = false;
+        window.addEventListener('mousemove', onVertexDragMove);
+        window.addEventListener('mouseup', endVertexDrag, { once: true });
+        window.addEventListener('blur', endVertexDrag);   // 窗口失焦也要收尾，避免拖拽态残留
+    }
+
+    function onVertexDragMove(ev) {
+        if (!vertexDrag || !roiSvgRef) return;
+        justDragged = true;
+        const pt = normPoint(ev);
+        const { roiId, index } = vertexDrag;
+        config.rois = (config.rois || []).map((r) => r.id === roiId
+            ? { ...r, points: (r.points || []).map((p, i) => (i === index ? pt : p)) }
+            : r);
+    }
+
+    function endVertexDrag() {
+        vertexDrag = null;
+        releaseDragListeners();
+        // 拖拽结束后浏览器可能补发一次 click，这里再兜一层，避免多落一个点
+        setTimeout(() => { justDragged = false; }, 0);
+    }
+
+    onDestroy(() => {
+        releaseDragListeners();
+    });
 
     // 开始绘制一个全新的检测区（下一次落点时才真正建池项，避免留下空区域）
     function startNewRoi() {
         drawingRoiId = null;
-        roiDrawActive = true;
+        closedRoiId = null;
     }
 
     // 续画/修改某个已有检测区（全屏项不可绘制）
     function editRoi(id) {
         if (id === 'full') return;
         drawingRoiId = id;
-        roiDrawActive = true;
+        closedRoiId = null;   // 选中已有区域 = 可继续编辑（续画/拖点）
+    }
+
+    // 点击表格某一行 → 在画布上选中并展示该区域（可继续拖点/续画）
+    function selectRoiRow(ev, id) {
+        if (ev.target.closest('input, button, select, textarea, label, a')) return;
+        if (id === 'full') { showToast('「全屏检测」覆盖整个画面，无需绘制。', 'info'); return; }
+        editRoi(id);
     }
 
     // 清除【当前绘制中】的检测区：整块删除，原本关联它的算法/智能体回落到全屏检测
     function clearRoi() {
         if (!drawingRoiId || drawingRoiId === 'full') {
-            showToast('当前没有正在绘制的检测区。点击画布即可开始绘制。', 'info');
+            showToast('当前没有选中的检测区。点击画布即可开始绘制。', 'info');
             return;
         }
         deleteRoi(drawingRoiId);
     }
 
-    // roiPoints -> SVG points 字符串（viewBox 800x500）：取【当前绘制中】的检测区
+    // 当前选中/绘制中的检测区 ——> 画布叠加（含可拖拽顶点）
     $: currentRoiPoints = drawingRoi?.points || [];
     $: roiSvgPoints = currentRoiPoints.map((p) => `${p.x * 800},${p.y * 500}`).join(' ');
+    $: roiClosed = currentRoiPoints.length >= 3;
 
     // 切换当前编辑的智能体
     function selectAgent(i) {
@@ -831,6 +950,7 @@
         config.agents = (config.agents || []).map((a) => a.roiId === id ? { ...a, roiId: 'full' } : a);
         config.algorithms = (config.algorithms || []).map((a) => a.roiId === id ? { ...a, roiId: 'full', useFullFrame: true } : a);
         if (drawingRoiId === id) drawingRoiId = null;   // 删的是正在绘制的那块，画布回到「待新建」态
+        if (closedRoiId === id) closedRoiId = null;
         showToast('已删除该检测区，关联项已回落为全屏检测。', 'info');
     }
 
@@ -930,13 +1050,6 @@
         const d = new Date(ts);
         const p = (n) => String(n).padStart(2, '0');
         return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-    }
-
-    function toggleRoi() {
-        roiDrawActive = !roiDrawActive;
-        showToast(roiDrawActive
-            ? '手动ROI绘制模式开启。支持通过划区限制小模型初筛目标，阻止非监控区噪声。'
-            : '退出区域绘制模式。', 'info');
     }
 
     function applyConfig(data) {
@@ -1042,7 +1155,6 @@
         monitorActive = true;
         wizardStep = 1;
         await loadSceneImage(proposal.alertType);
-        roiDrawActive = true;
         showToast('已载入推荐参数与最新报警大图，请在视频区点击绘制检测区(ROI)。', 'success');
         await scrollToBottom();
     }
@@ -1075,7 +1187,6 @@
         monitorActive = true;
         wizardStep = 1;
         await loadSceneImage(d.alertType);
-        roiDrawActive = !(d.taskMode === 'agent');
         pushSystemTip(d.name || row.task_name || '布控任务');
         showToast(`已载入任务「${d.name || row.task_name || row.task_id}」的真实参数。`, 'success');
         await scrollToBottom();
@@ -1144,7 +1255,6 @@
         if (ch) config.channel_device_id = ch.device_id;
         templateApplied = false;
         monitorActive = true;
-        roiDrawActive = true;
         wizardStep = 1;
         panelView = 'editor';
         sceneImage = null;
@@ -1179,7 +1289,6 @@
         await loadDevices();
         config = { ...defaultConfig };
         monitorActive = false;
-        roiDrawActive = false;
         wizardStep = 1;
         panelView = 'list';
     }
@@ -1478,7 +1587,6 @@
         monitorActive = true;
         wizardStep = 1;
         await loadSceneImage(d.alertType);
-        roiDrawActive = !(d.taskMode === 'agent');   // 仓任务仍开绘制，允许用户按需重画 ROI（非强制）
         showToast(`已套用参数模板「${tpl.name}」，可直接部署（如需可重新绘制检测区(ROI)）。`, 'success');
     }
 
@@ -2052,12 +2160,9 @@
                     <div class="flex items-center justify-between mb-3 pb-3 border-b border-slate-800">
                         <div class="flex items-center space-x-2">
                             <span class="w-2.5 h-2.5 bg-rose-500 rounded-full animate-pulse"></span>
-                            <span class="font-bold text-xs text-slate-200">{monitorActive ? `设备实况监视：${$selectedDevice?.name || '当前设备'} (已激活小模型+Agent双层过滤器)` : '未载入通道流 (发送指令激活)'}</span>
+                            <span class="font-bold text-xs text-slate-200">{monitorActive ? `设备实况监视：${monitorLabel}` : '未载入通道流 (发送指令激活)'}</span>
                         </div>
                         <div class="flex space-x-1.5 text-[11px] text-slate-400">
-                            <button on:click={toggleRoi} class="px-2.5 py-1 rounded border transition-colors {roiDrawActive ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-900 hover:bg-indigo-950 hover:text-indigo-400 border-slate-800 hover:border-indigo-500/30'}">
-                                <i class="fa-solid fa-draw-polygon mr-1"></i>画制检测区 (ROI)
-                            </button>
                             <button on:click={startNewRoi} title="结束当前区域，下一次点击画布开始绘制新的检测区"
                                     class="px-2.5 py-1 rounded border bg-slate-900 hover:bg-indigo-950 hover:text-indigo-400 border-slate-800 hover:border-indigo-500/30 transition-colors">
                                 <i class="fa-solid fa-plus mr-1"></i>绘制新区域
@@ -2066,7 +2171,12 @@
                                 <i class="fa-solid fa-eraser mr-1"></i>清除
                             </button>
                             <!-- 实时流状态：连接中/实时/失败（失败时画面自动回退到静态报警图，ROI 仍可画） -->
-                            {#if streamState === 'connecting'}
+                            {#if !liveChannelOnline}
+                                <span class="px-2 py-1 rounded border border-amber-600/40 bg-amber-950/40 text-amber-300 font-mono"
+                                      title={`通道 ${config.channel_device_id}${liveChannel?.proto ? `（${liveChannel.proto} 拨流）` : ''} 当前离线：没有实时视频流，画面回退为静态报警图`}>
+                                    <i class="fa-solid fa-video-slash mr-1"></i>通道离线
+                                </span>
+                            {:else if streamState === 'connecting'}
                                 <span class="px-2 py-1 rounded border border-amber-600/40 bg-amber-950/40 text-amber-300 font-mono"
                                       title={streamInfo?.rx ? `已收 ${streamInfo.rx} 帧，已解码 ${streamInfo.live || 0} 帧（codec=${streamInfo.codec || '-'}）` : '正在向设备订阅视频流'}>
                                     <i class="fa-solid fa-arrows-rotate animate-spin mr-1"></i>连接中
@@ -2101,16 +2211,22 @@
                             <LiveStream bind:this={liveRef}
                                         deviceId={$selectedDevice?.id || ''}
                                         channelId={config.channel_device_id || ''}
-                                        active={monitorActive && wizardStep === 2}
+                                        active={monitorActive && wizardStep === 2 && liveChannelOnline}
                                         on:status={onLiveStatus}
                                         on:meta={onLiveMeta} />
                             {#if streamState === 'error' && streamError}
                                 <div class="absolute left-2 right-2 bottom-2 z-20 bg-rose-950/90 border border-rose-600/60 text-rose-200 text-[10px] rounded-lg px-2.5 py-1.5 leading-relaxed">
                                     <i class="fa-solid fa-triangle-exclamation mr-1"></i>{streamError}
                                 </div>
+                            {:else if streamState !== 'live'}
+                                <!-- 没出实时帧时，画面是静态报警大图（按设备取最新一张，所以各任务看起来一样），
+                                     这里明确标注，避免被误认为「所有任务都是同一条固定的流」 -->
+                                <div class="absolute bottom-2 left-2 z-10 bg-slate-900/85 border border-slate-700 text-slate-300 text-[10px] rounded px-2 py-1">
+                                    <i class="fa-solid fa-image mr-1 text-slate-500"></i>静态报警图（非实时）· 通道 {config.channel_device_id || '未选'}{liveChannelOnline ? '' : ' · 通道离线'}
+                                </div>
                             {/if}
-                            <svg bind:this={roiSvgRef} on:click={addRoiPoint} role="presentation"
-                                 class="absolute inset-0 w-full h-full {roiDrawActive ? 'cursor-crosshair' : 'pointer-events-none'}"
+                            <svg bind:this={roiSvgRef} on:click={addRoiPoint} on:contextmenu={onRoiContextMenu} role="presentation"
+                                 class="absolute inset-0 w-full h-full cursor-crosshair"
                                  viewBox="0 0 800 500" preserveAspectRatio="none">
                                 <!-- 其它检测区的叠加预览（受表格「显示」列控制，仅视图层，不参与部署） -->
                                 {#each overlayRois as r (r.id)}
@@ -2119,18 +2235,29 @@
                                 {/each}
                                 {#if currentRoiPoints.length}
                                     <polygon points={roiSvgPoints} fill="rgba(99,102,241,0.14)" stroke="#6366f1" stroke-width="2.5" />
-                                    {#each currentRoiPoints as p}
-                                        <circle cx={p.x * 800} cy={p.y * 500} r="5" fill="#6366f1" stroke="#fff" stroke-width="1.5" />
+                                    <!-- 顶点可拖拽：按住拖动即可改点位置 -->
+                                    {#each currentRoiPoints as p, i}
+                                        <circle cx={p.x * 800} cy={p.y * 500} r="6" fill="#6366f1" stroke="#fff" stroke-width="1.5"
+                                                class="cursor-move"
+                                                on:mousedown={(e) => startVertexDrag(e, i)}
+                                                on:click|stopPropagation={() => {}}
+                                                on:contextmenu|stopPropagation|preventDefault={() => {}} />
                                     {/each}
                                 {:else}
                                     <polygon points="20,20 780,20 780,480 20,480" fill="rgba(99,102,241,0.06)" stroke="#6366f1" stroke-width="2" stroke-dasharray="6" />
                                 {/if}
                             </svg>
-                            {#if roiDrawActive}
-                                <div class="absolute top-2 left-2 bg-indigo-600/90 text-white text-[10px] font-bold px-2 py-1 rounded shadow">
-                                    <i class="fa-solid fa-draw-polygon mr-1"></i>{drawingRoi ? `正在绘制：${drawingRoi.name}（已 ${currentRoiPoints.length} 点）` : '点击画面开始绘制新的检测区'}
-                                </div>
-                            {/if}
+                            <!-- 操作提示：落点/闭环/拖点，始终显示（不再需要先开绘制模式） -->
+                            <div class="absolute top-2 left-2 bg-indigo-600/90 text-white text-[10px] font-bold px-2 py-1 rounded shadow pointer-events-none">
+                                <i class="fa-solid fa-draw-polygon mr-1"></i>
+                                {#if drawingRoi && closedRoiId === drawingRoi.id}
+                                    已闭合：{drawingRoi.name}（{currentRoiPoints.length} 点）· 可拖动白点微调，点击画面开始新区域
+                                {:else if drawingRoi}
+                                    正在编辑：{drawingRoi.name}（{currentRoiPoints.length}/{MAX_ROI_POINTS} 点）· 点击续画，右键闭合，可拖动白点
+                                {:else}
+                                    点击画面落点绘制检测区（最多 {MAX_ROI_POINTS} 点，右键闭合）
+                                {/if}
+                            </div>
                             {#if isCombinedTask}
                                 <div class="absolute bottom-2 right-2 bg-emerald-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow flex items-center"><i class="fa-solid fa-crop mr-1"></i> Agent裁图区 (上扩{config.cropUp} / 下{config.cropDown})</div>
                             {:else if isAgentTask}
@@ -2172,7 +2299,8 @@
                                 <tbody>
                                     {#each tableRois as roi (roi.id)}
                                         {@const isFull = roi.id === 'full'}
-                                        <tr class="border-t border-slate-800 hover:bg-slate-900/40 transition-colors {roi.id === drawingRoiId ? 'bg-indigo-950/30' : ''}">
+                                        <tr on:click={(e) => selectRoiRow(e, roi.id)} title={isFull ? '' : '点击该行可在画布上查看/编辑此区域'}
+                                            class="border-t border-slate-800 hover:bg-slate-900/40 transition-colors {isFull ? '' : 'cursor-pointer'} {roi.id === drawingRoiId ? 'bg-indigo-950/30' : ''}">
                                             <td class="px-3 py-3 align-middle">
                                                 {#if isFull}
                                                     <i class="fa-solid fa-expand text-slate-600 text-[11px]" title="全屏检测覆盖整个画面，无需叠加预览"></i>
@@ -2230,9 +2358,9 @@
                                                 {#if isFull}
                                                     <span class="text-[10px] text-slate-600">不可删除</span>
                                                 {:else}
-                                                    <button type="button" on:click={() => editRoi(roi.id)} title="在画布上续画/修改该检测区"
+                                                    <button type="button" on:click={() => editRoi(roi.id)} title="在画布上查看/修改该检测区（可拖顶点、续画）"
                                                             class="text-[11px] mr-2 font-medium {roi.id === drawingRoiId ? 'text-indigo-300' : 'text-indigo-500 hover:text-indigo-400'}">
-                                                        <i class="fa-solid fa-pen-to-square mr-1"></i>{roi.id === drawingRoiId ? '绘制中' : '继续绘制'}
+                                                        <i class="fa-solid fa-pen-to-square mr-1"></i>{roi.id === drawingRoiId ? (closedRoiId === roi.id ? '已闭合' : '绘制中') : '继续绘制'}
                                                     </button>
                                                     <button type="button" on:click={() => deleteRoi(roi.id)} title="删除该检测区"
                                                             class="text-[11px] text-rose-500 hover:text-rose-400 font-medium">
@@ -2247,7 +2375,8 @@
                         </div>
 
                         <p class="text-[9px] text-slate-500 mt-2 leading-relaxed">
-                            画布上直接点击即可绘制检测区（无需先选算法），画完自动新增一行；点「绘制新区域」开始下一块，行内「继续绘制」可续画已有区域。
+                            画布上直接点击落点即可绘制检测区（最多 {MAX_ROI_POINTS} 点）：<b class="text-slate-400">鼠标右键闭合</b>，或点数达到 {MAX_ROI_POINTS} 时自动闭环；闭合后画完自动新增一行。
+                            点表格里任意一行，可在画布上选中并展示该区域，<b class="text-slate-400">拖动白色顶点</b>即可调整形状。
                             区域名可直接改，删除后关联项自动回落到默认「全屏检测」。
                             每个{isAgentTask ? '智能体' : '算法'}同时只能关联一个区域，在别行勾选即改绑到该行；默认全部关联「全屏检测」。
                             {#if !isAgentTask}手动配置时，关联了未画完（少于 3 点）检测区的算法不可部署；套用模板则跳过此限制。{/if}

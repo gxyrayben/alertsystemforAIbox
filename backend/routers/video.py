@@ -114,6 +114,13 @@ async def device_stream_probe(device_id: str, channel_id: str = Query(""),
             summary["error"] = f"设备 {device_id} 不存在"
             return summary
         async with vs.DeviceService.new_client(device, timeout=15.0) as client:
+            # 离线通道闸门：离线通道订阅后拿不到画面，按快照提前判定并直接给结论
+            summary["channel"] = vs.channel_info(device, channel_id)
+            if summary["channel"]["found"] and not summary["channel"]["online"]:
+                summary["error"] = (f"通道 {channel_id}"
+                                    + (f"「{summary['channel']['name']}」" if summary["channel"]["name"] else "")
+                                    + "当前离线，没有实时视频流")
+                return summary
             _t0 = time.time()
             ok, info, err = await vs.subscribe(client, device, db, channel_id)
             _t_sub = time.time() - _t0
@@ -186,6 +193,19 @@ async def device_stream(ws: WebSocket, device_id: str, channel_id: str = Query("
         state: dict = {"error": "", "closed": False, "codec": ""}
         pump_task = None
         handle = None
+        # 通道在线状态闸门：离线通道订阅后拿不到任何画面（实测 0 帧），
+        # 提前按快照判定可以立刻给出结论，不用干等首帧超时。
+        ch = vs.channel_info(device, channel_id)
+        if ch["found"] and not ch["online"]:
+            label = f"通道 {channel_id}「{ch['name']}」" if ch["name"] else f"通道 {channel_id}"
+            await _safe_send_json(ws, {
+                "event": "error",
+                "message": f"{label}当前离线，没有实时视频流"
+                           + (f"（{ch['proto']} 拨流）" if ch["proto"] else "")
+                           + "；可在任务列表点「从设备重新拉取」刷新通道状态。",
+            })
+            await _safe_close(ws, 1011)
+            return
         async with vs.DeviceService.new_client(device, timeout=15.0) as client:
             _t0 = time.time()
             ok, info, err = await vs.subscribe(client, device, db, channel_id)

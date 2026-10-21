@@ -21,6 +21,7 @@
 - H264/H265 需要浏览器侧解码器（MSE/WebCodecs），不在本模块范围内，会向上报明确的 unsupported 状态。
 """
 import asyncio
+import json
 import ssl
 import struct
 from typing import Optional, Tuple
@@ -33,8 +34,10 @@ from services.device_service import DeviceService
 SUBSCRIBE_PATH = "/media_video/subscribe_stream"
 WS_PATH = "/media_video/stream"
 HEADER_LEN = 16
-# 订阅时必须显式带上的「本地设备 id」：实测缺省会被设备回 0x40000002 并断连
-LOCAL_DEVICE_ID = 1
+# 订阅时必须显式带上 device_id（缺省会回 0x40000002 并断连）。
+# ⚠ 实测关键结论：device_id 必须传【通道自己的 id】，即 device_id == channel_id。
+#   写死 1 时，设备会把所有订阅都路由到同一路固定画面（并发两路逐字节相同），
+#   表现为「不管选哪个任务，看到的都是同一路流」。
 
 FRAME_TYPE = {0: "sensor", 1: "video", 2: "audio", 3: "image", 4: "smart", 256: "end"}
 CODEC_NAME = {1: "H264", 2: "H265", 3: "MJPEG"}
@@ -136,24 +139,52 @@ def ws_ssl_context(device: DeviceORM) -> Optional[ssl.SSLContext]:
     return ctx
 
 
+def channel_info(device: DeviceORM, channel_id) -> dict:
+    """从设备快照（device.channels，JSON 文本）里查通道：{found, online, name, proto}。
+
+    为什么必须查这个：实测该设备即使通道**离线**（onlinestatus=offline，且是 rtsp 拨流），
+    订阅后依然会返回视频帧 —— 内容其实是**别的画面**顶替。所以只凭"能收到帧"判断
+    通道是否可用是错的（会给你显示一路完全不相干的流）。
+    """
+    out = {"found": False, "online": False, "name": "", "proto": ""}
+    try:
+        channels = json.loads(getattr(device, "channels", None) or "[]")
+    except (TypeError, ValueError):
+        channels = []
+    if not isinstance(channels, list):
+        return out
+    for c in channels:
+        if str(c.get("device_id")) != str(channel_id):
+            continue
+        out["found"] = True
+        out["name"] = str(c.get("device_name") or "")
+        out["proto"] = str(c.get("proto") or "")
+        out["online"] = str(c.get("onlinestatus") or "").lower() == "online"
+        break
+    return out
+
+
 # ── 订阅 / 退订 ─────────────────────────────────────────────────────────
 async def subscribe(client: httpx.AsyncClient, device: DeviceORM, db,
-                    channel_id, device_id=LOCAL_DEVICE_ID) -> Tuple[bool, dict, str]:
+                    channel_id, device_id=None) -> Tuple[bool, dict, str]:
     """订阅通道视频流。返回 (成功?, {stream_id, handle}, 错误消息)。
 
-    ⚠ 实测（Dev01 / 固件现场验证）：`device_id` **必须显式传**，缺省时设备会回
-    `0x40000002` 并直接断开 WS（虽然协议文档写的是"非必须，缺省代表本地设备"）。
-    取值为「本地设备 id」，实测传 1 对多个通道均有效，与 channel_id 无关。
+    `device_id` 决定**取哪一路画面**，必须与 `channel_id` 相同：
+    - 缺省（不传）→ 设备回 `0x40000002` 并直接断连，收不到任何画面；
+    - 传错（例如固定 1）→ 不报错，但所有订阅都拿到**同一路**固定画面（静默错流，最难排查）；
+    - 传通道 id → 正确分流（并发验证：不同通道首帧字节互不相同）。
     """
     try:
         body = {"channel_id": int(channel_id)}
     except (TypeError, ValueError):
         return False, {}, f"channel_id 非法：{channel_id!r}"
-    if device_id not in (None, ""):
-        try:
-            body["device_id"] = int(device_id)
-        except (TypeError, ValueError):
-            pass
+    # device_id 缺省时跟随 channel_id（见函数文档）
+    if device_id in (None, ""):
+        device_id = body["channel_id"]
+    try:
+        body["device_id"] = int(device_id)
+    except (TypeError, ValueError):
+        return False, {}, f"device_id 非法：{device_id!r}"
     data = await DeviceService.authed_post(client, device, db, SUBSCRIBE_PATH, body)
     if data is None:
         return False, {}, f"设备「{device.name}」离线或不可达，无法订阅视频流"

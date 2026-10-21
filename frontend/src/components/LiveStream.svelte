@@ -41,6 +41,7 @@
     let cfgKey = '';             // 已配置的 codec 字符串（SPS 变化时重新 configure）
     let tsCounter = 0;           // WebCodecs 要求时间戳单调递增
     let liveFrames = 0;
+    let hasFrame = false;        // 本次连接是否已出过画面（切通道时先清掉旧画面）
     let rxFrames = 0;            // 收到的二进制帧数（诊断用）
     let lastError = '';          // WebCodecs/解码器错误原文（诊断用）
     let watchdog = null;
@@ -89,11 +90,25 @@
         }
     }
 
+    // 清空画布：切换通道时必须擦掉上一路的最后一帧，
+    // 否则新通道拉流失败/无画面时，旧画面会一直留在画布上，
+    // 看起来就像「所有任务都在显示同一条固定的流」。
+    function clearCanvas() {
+        const c = canvasEl;
+        if (!c) return;
+        try {
+            const ctx = c.getContext('2d');
+            if (ctx) ctx.clearRect(0, 0, c.width, c.height);
+        } catch (e) { /* 忽略 */ }
+    }
+
     function reset() {
         releaseJpeg();
         teardownDecoder();
         mode = '';
         liveFrames = 0;
+        hasFrame = false;
+        clearCanvas();   // 关键：切通道立刻擦掉上一路残留帧
     }
 
     function wsUrl(id, ch) {
@@ -121,6 +136,7 @@
                     emitMeta(frame.displayWidth, frame.displayHeight);
                     frame.close();
                     liveFrames += 1;
+                    hasFrame = true;
                     if (liveFrames === 1) { clearWatchdog(); emitStatus('live'); }
                 },
                 error: (e) => {
@@ -236,6 +252,7 @@
                 try { msg = JSON.parse(ev.data); } catch (e) { msg = {}; }
                 console.info('[live] recv', msg);
                 if (msg.event === 'ready') {
+                    hasFrame = false;   // 新一路流：等它的首帧再显示
                     mode = msg.mode === 'video' ? 'video' : 'jpeg';
                     armWatchdog();
                     if (msg.mode === 'video') {
@@ -258,6 +275,7 @@
             handleBinary(ev.data);
             if (mode === 'jpeg') {
                 liveFrames += 1;
+                hasFrame = true;
                 if (liveFrames === 1) { clearWatchdog(); emitStatus('live'); }
             }
         };
@@ -286,7 +304,7 @@
 </script>
 
 <!-- canvas 常驻：首帧解码回调可能早于条件渲染完成，若按 mode 条件挂载会丢掉最早的几帧 -->
-<canvas bind:this={canvasEl} class="absolute inset-0 w-full h-full" class:hidden={mode !== 'video'}></canvas>
-{#if mode === 'jpeg' && jpegUrl}
+<canvas bind:this={canvasEl} class="absolute inset-0 w-full h-full" class:hidden={mode !== 'video' || !hasFrame}></canvas>
+{#if mode === 'jpeg' && hasFrame && jpegUrl}
     <img src={jpegUrl} alt="实时视频流" class="absolute inset-0 w-full h-full object-fill" />
 {/if}
